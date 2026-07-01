@@ -1,0 +1,6 @@
+{
+  "name": "Gestor de Convenios",
+  "description": "Aplicación para la gestión de convenios, visualización de vencimientos y alertas de renovación con base de datos SQLite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

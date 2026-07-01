@@ -1,0 +1,1261 @@
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { getDb } from "./server/db.js";
+import nodemailer from "nodemailer";
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  // Middleware
+  app.use(express.json());
+
+  // Simple Session Authorization Helper
+  const getUserFromRequest = async (req: express.Request) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return null;
+    }
+    const token = authHeader.substring(7); // "Bearer <userId_or_email>"
+    const db = await getDb();
+    
+    // We can use the simple token as the user ID for lightweight iframe auth
+    const user = await db.get("SELECT id, email, name, role FROM users WHERE id = ? OR email = ?", [token, token]);
+    return user || null;
+  };
+
+  // Helper to compute alerts for a single convenio
+  const computeAlertsForConvenio = (c: any, todayStr: string, dismissedKeys: string[] = []) => {
+    const alerts: any[] = [];
+    const today = new Date(todayStr);
+
+    // 1. Determine effective end date
+    let effectiveEndDateStr = c.fecha_terminacion;
+    let endType = "original";
+
+    if (c.fecha_terminacion_prorroga) {
+      effectiveEndDateStr = c.fecha_terminacion_prorroga;
+      endType = "prórroga";
+    } else if (c.fecha_terminacion_ampliacion) {
+      effectiveEndDateStr = c.fecha_terminacion_ampliacion;
+      endType = "ampliación";
+    }
+
+    if (effectiveEndDateStr) {
+      const endDate = new Date(effectiveEndDateStr);
+      const diffTime = endDate.getTime() - today.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+      if (diffDays < 0) {
+        const key = `vencido-${c.id}`;
+        if (!dismissedKeys.includes(key)) {
+          alerts.push({
+            key,
+            convenioId: c.id,
+            convenioCodigo: c.codigo,
+            convenioTitulo: c.titulo_proyecto,
+            tipo: "vencido",
+            severidad: "danger", // Red alert
+            fechaReferencia: effectiveEndDateStr,
+            mensaje: `El convenio ha vencido hace ${Math.abs(diffDays)} días (vence de acuerdo a: ${endType} el ${effectiveEndDateStr}).`,
+            diasRestantes: diffDays
+          });
+        }
+      } else if (diffDays <= 30) {
+        const key = `vencer-30-${c.id}`;
+        if (!dismissedKeys.includes(key)) {
+          alerts.push({
+            key,
+            convenioId: c.id,
+            convenioCodigo: c.codigo,
+            convenioTitulo: c.titulo_proyecto,
+            tipo: "vence_pronto",
+            severidad: "warning_high", // Amber/Orange alert
+            fechaReferencia: effectiveEndDateStr,
+            mensaje: `El convenio vencerá pronto, quedan ${diffDays} días (fecha límite: ${effectiveEndDateStr}).`,
+            diasRestantes: diffDays
+          });
+        }
+      } else if (diffDays <= 90) {
+        const key = `vencer-90-${c.id}`;
+        if (!dismissedKeys.includes(key)) {
+          alerts.push({
+            key,
+            convenioId: c.id,
+            convenioCodigo: c.codigo,
+            convenioTitulo: c.titulo_proyecto,
+            tipo: "vence_pronto_90",
+            severidad: "warning_low", // Yellow alert
+            fechaReferencia: effectiveEndDateStr,
+            mensaje: `El convenio vencerá en los próximos 3 meses, quedan ${diffDays} días (fecha límite: ${effectiveEndDateStr}).`,
+            diasRestantes: diffDays
+          });
+        }
+      }
+    }
+
+    // 2. Check Primer Informe date alert (if set)
+    if (c.primer_informe) {
+      const reportDate = new Date(c.primer_informe);
+      const diffTime = reportDate.getTime() - today.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+      // Warn if report is due in <= 15 days or is overdue
+      if (diffDays <= 15 && (!c.segundo_informe || c.segundo_informe === "Pendiente de entrega" || c.segundo_informe === "Pendiente")) {
+        const key = `primer_informe-${c.id}`;
+        if (!dismissedKeys.includes(key)) {
+          alerts.push({
+            key,
+            convenioId: c.id,
+            convenioCodigo: c.codigo,
+            convenioTitulo: c.titulo_proyecto,
+            tipo: "primer_informe",
+            severidad: diffDays < 0 ? "danger" : "info",
+            fechaReferencia: c.primer_informe,
+            mensaje: diffDays < 0 
+              ? `El plazo para el Primer Informe venció hace ${Math.abs(diffDays)} días (fecha límite: ${c.primer_informe}).`
+              : `Faltan ${diffDays} días para la entrega del Primer Informe (fecha límite: ${c.primer_informe}).`,
+            diasRestantes: diffDays
+          });
+        }
+      }
+    }
+
+    // 3. Check Policy / Ampliación Póliza Warning
+    // If we have an extension/ampliacion but the policy date or reference is blank
+    if (c.fecha_terminacion_ampliacion && !c.fecha_acta_aprobacion_ampliacion_poliza) {
+      const key = `poliza-ampliacion-${c.id}`;
+      if (!dismissedKeys.includes(key)) {
+        alerts.push({
+          key,
+          convenioId: c.id,
+          convenioCodigo: c.codigo,
+          convenioTitulo: c.titulo_proyecto,
+          tipo: "poliza_pendiente",
+          severidad: "warning_low",
+          fechaReferencia: c.fecha_terminacion_ampliacion,
+          mensaje: "Convenio con ampliación de plazo pero sin registrar fecha de aprobación de ampliación de póliza.",
+          diasRestantes: null
+        });
+      }
+    }
+
+    // 4. Check Suspended Status
+    if (c.fecha_suspension && !c.fecha_reinicio) {
+      const key = `suspension-activa-${c.id}`;
+      if (!dismissedKeys.includes(key)) {
+        alerts.push({
+          key,
+          convenioId: c.id,
+          convenioCodigo: c.codigo,
+          convenioTitulo: c.titulo_proyecto,
+          tipo: "suspendido",
+          severidad: "info",
+          fechaReferencia: c.fecha_suspension,
+          mensaje: `Convenio suspendido temporalmente desde el ${c.fecha_suspension}. Pendiente reinicio.`,
+          diasRestantes: null
+        });
+      }
+    }
+
+    return alerts;
+  };
+
+  // Helper to send email notifications using settings from SQLite database
+  const sendEmail = async ({ to, subject, html }: { to: string; subject: string; html: string }) => {
+    try {
+      const db = await getDb();
+      const settings = await db.get("SELECT * FROM email_settings LIMIT 1");
+      if (!settings || !settings.enabled) {
+        console.log("Notificaciones por correo desactivadas o no configuradas.");
+        return false;
+      }
+      if (!settings.user || !settings.pass) {
+        console.log("Usuario o contraseña de correo no configurados en los ajustes.");
+        return false;
+      }
+
+      const transporter = nodemailer.createTransport({
+        host: settings.host,
+        port: Number(settings.port),
+        secure: Number(settings.secure) === 1,
+        auth: {
+          user: settings.user,
+          pass: settings.pass,
+        },
+      });
+
+      const mailOptions = {
+        from: `"${settings.sender_name || 'Gestor de Convenios'}" <${settings.user}>`,
+        to,
+        subject,
+        html,
+      };
+
+      const info = await transporter.sendMail(mailOptions);
+      console.log(`Correo enviado correctamente a ${to}: ${info.messageId}`);
+      return true;
+    } catch (error) {
+      console.error("Error al enviar correo electrónico:", error);
+      return false;
+    }
+  };
+
+  // --- API ROUTES ---
+
+  // Auth: Login
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const { email, password } = req.body;
+      if (!email || !password) {
+        return res.status(400).json({ error: "Correo electrónico y contraseña son requeridos" });
+      }
+
+      const db = await getDb();
+      const user = await db.get("SELECT * FROM users WHERE email = ?", [email]);
+
+      if (!user || user.password !== password) {
+        return res.status(401).json({ error: "Credenciales incorrectas" });
+      }
+
+      // Successful login
+      return res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role
+        },
+        token: String(user.id) // Simple ID token
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error interno del servidor en login" });
+    }
+  });
+
+  // Auth: Register (Restricted to Admins)
+  app.post("/api/auth/register", async (req, res) => {
+    try {
+      const currentUser = await getUserFromRequest(req);
+      if (!currentUser || currentUser.role !== "admin") {
+        return res.status(403).json({ error: "No autorizado. Solo los administradores pueden registrar nuevos usuarios." });
+      }
+
+      const { email, password, name, role } = req.body;
+      if (!email || !password || !name) {
+        return res.status(400).json({ error: "Todos los campos (email, contraseña, nombre) son requeridos" });
+      }
+
+      // Default to 'usuario' if not specified or invalid
+      const targetRole = role === "admin" ? "admin" : "usuario";
+
+      const db = await getDb();
+      
+      // Check if user exists
+      const existing = await db.get("SELECT id FROM users WHERE email = ?", [email]);
+      if (existing) {
+        return res.status(400).json({ error: "El correo electrónico ya está registrado" });
+      }
+
+      const result = await db.run(
+        "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+        [email, password, name, targetRole]
+      );
+
+      const newUser = await db.get("SELECT id, email, name, role FROM users WHERE id = ?", [result.lastID]);
+
+      return res.status(201).json({
+        user: newUser,
+        message: "Usuario registrado con éxito por el administrador"
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error en el registro de usuario" });
+    }
+  });
+
+  // Users: Get all (Restricted to Admins)
+  app.get("/api/users", async (req, res) => {
+    try {
+      const currentUser = await getUserFromRequest(req);
+      if (!currentUser || currentUser.role !== "admin") {
+        return res.status(403).json({ error: "No autorizado. Solo los administradores pueden ver la lista de usuarios." });
+      }
+
+      const db = await getDb();
+      const usersList = await db.all("SELECT id, email, name, role FROM users ORDER BY name ASC");
+      return res.json({ users: usersList });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener lista de usuarios" });
+    }
+  });
+
+  // Users: Delete user (Restricted to Admins, no self-deletion)
+  app.delete("/api/users/:id", async (req, res) => {
+    try {
+      const currentUser = await getUserFromRequest(req);
+      if (!currentUser || currentUser.role !== "admin") {
+        return res.status(403).json({ error: "No autorizado. Solo los administradores pueden eliminar usuarios." });
+      }
+
+      const targetId = parseInt(req.params.id, 10);
+      if (isNaN(targetId)) {
+        return res.status(400).json({ error: "ID de usuario inválido" });
+      }
+
+      if (currentUser.id === targetId) {
+        return res.status(400).json({ error: "No puedes eliminar tu propia cuenta de administrador" });
+      }
+
+      const db = await getDb();
+      
+      // Check if user exists
+      const userToDelete = await db.get("SELECT id, name FROM users WHERE id = ?", [targetId]);
+      if (!userToDelete) {
+        return res.status(404).json({ error: "El usuario no existe" });
+      }
+
+      await db.run("DELETE FROM users WHERE id = ?", [targetId]);
+      return res.json({ message: `Usuario ${userToDelete.name} eliminado correctamente` });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al eliminar usuario" });
+    }
+  });
+
+  // Email Settings: Get current config
+  app.get("/api/email-settings", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const db = await getDb();
+      const settings = await db.get("SELECT host, port, secure, user, sender_name, enabled FROM email_settings LIMIT 1");
+      
+      return res.json(settings || {
+        host: "smtp.gmail.com",
+        port: 587,
+        secure: 0,
+        user: "",
+        sender_name: "Gestor de Convenios",
+        enabled: 0
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener configuración de correo" });
+    }
+  });
+
+  // Email Settings: Update config
+  app.post("/api/email-settings", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const { host, port, secure, user: emailUser, pass, sender_name, enabled } = req.body;
+      const db = await getDb();
+
+      // Check if we need to update pass (only if a non-empty string is provided)
+      if (pass && pass.trim()) {
+        await db.run(
+          `UPDATE email_settings SET host = ?, port = ?, secure = ?, user = ?, pass = ?, sender_name = ?, enabled = ? WHERE id = (SELECT id FROM email_settings LIMIT 1)`,
+          [host, Number(port), Number(secure), emailUser, pass, sender_name, Number(enabled)]
+        );
+      } else {
+        await db.run(
+          `UPDATE email_settings SET host = ?, port = ?, secure = ?, user = ?, sender_name = ?, enabled = ? WHERE id = (SELECT id FROM email_settings LIMIT 1)`,
+          [host, Number(port), Number(secure), emailUser, sender_name, Number(enabled)]
+        );
+      }
+
+      const updated = await db.get("SELECT host, port, secure, user, sender_name, enabled FROM email_settings LIMIT 1");
+      return res.json({ success: true, message: "Configuración de correo guardada correctamente", settings: updated });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al guardar configuración de correo" });
+    }
+  });
+
+  // Email Settings: Send a test email on-the-fly
+  app.post("/api/email-settings/test", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const { host, port, secure, user: emailUser, pass, sender_name, to } = req.body;
+      if (!emailUser || !pass || !to) {
+        return res.status(400).json({ error: "El correo emisor, la contraseña y el correo destino son obligatorios para la prueba." });
+      }
+
+      const transporter = nodemailer.createTransport({
+        host: host || "smtp.gmail.com",
+        port: Number(port) || 587,
+        secure: Number(secure) === 1,
+        auth: {
+          user: emailUser,
+          pass: pass,
+        },
+      });
+
+      const mailOptions = {
+        from: `"${sender_name || 'Gestor de Convenios (Prueba)'}" <${emailUser}>`,
+        to,
+        subject: "Prueba de Configuración de Correo - Gestor de Convenios",
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+            <div style="text-align: center; margin-bottom: 20px;">
+              <div style="display: inline-block; padding: 12px; background-color: #e0e7ff; border-radius: 50%; color: #4f46e5; font-size: 24px; font-weight: bold; width: 40px; height: 40px; line-height: 40px;">✓</div>
+            </div>
+            <h2 style="color: #4f46e5; margin-top: 0; text-align: center; font-family: system-ui, sans-serif;">¡Conexión de Correo Exitosa!</h2>
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Estimado usuario,</p>
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Este es un correo de prueba enviado desde la plataforma <strong>Gestor de Convenios</strong>.</p>
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Tu configuración de servidor SMTP (Gmail con Contraseña de Aplicación) ha sido validada y está lista para enviar notificaciones automáticas a los responsables de convenios.</p>
+            
+            <div style="background-color: #f8fafc; border: 1px solid #f1f5f9; padding: 15px; border-radius: 8px; margin: 20px 0;">
+              <h4 style="margin: 0 0 8px 0; color: #475569; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;">Detalles de la conexión:</h4>
+              <table style="width: 100%; font-size: 13px; color: #334155; border-collapse: collapse;">
+                <tr>
+                  <td style="padding: 4px 0; font-weight: bold;">Servidor SMTP:</td>
+                  <td style="padding: 4px 0;">${host}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; font-weight: bold;">Puerto:</td>
+                  <td style="padding: 4px 0;">${port}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; font-weight: bold;">Usuario:</td>
+                  <td style="padding: 4px 0;">${emailUser}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 4px 0; font-weight: bold;">SSL/TLS:</td>
+                  <td style="padding: 4px 0;">${Number(secure) === 1 ? "Sí" : "No (STARTTLS)"}</td>
+                </tr>
+              </table>
+            </div>
+            
+            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+            <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Este mensaje fue solicitado por ${user.name} (${user.email}) el ${new Date().toLocaleString()}</p>
+          </div>
+        `,
+      };
+
+      await transporter.sendMail(mailOptions);
+      return res.json({ success: true, message: `Correo de prueba enviado con éxito a ${to}` });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al enviar correo de prueba: " + err.message });
+    }
+  });
+
+  // Alerts: Notify bulk
+  app.post("/api/alerts/notify-bulk", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const db = await getDb();
+      const settings = await db.get("SELECT enabled, user FROM email_settings LIMIT 1");
+      if (!settings || !settings.enabled) {
+        return res.status(400).json({ error: "Las notificaciones por correo están desactivadas. Por favor, configúrelas primero." });
+      }
+
+      const list = await db.all("SELECT * FROM convenios");
+      const dismissed = await db.all("SELECT convenio_id, alert_key FROM dismissed_alerts WHERE user_id = ?", [user.id]);
+      const dismissedKeys = dismissed.map(d => `${d.convenio_id}:${d.alert_key}`);
+
+      const todayStr = new Date().toISOString().split('T')[0];
+      let notifiedCount = 0;
+      let failedCount = 0;
+      const details: string[] = [];
+
+      for (const c of list) {
+        const alerts = computeAlertsForConvenio(c, todayStr, dismissedKeys);
+        if (alerts.length > 0) {
+          const recipient = c.correo_responsable || c.correo_investigador;
+          if (recipient && recipient.trim()) {
+            const alertsHtml = alerts.map(a => `
+              <li style="margin-bottom: 12px; padding: 12px; border-left: 4px solid ${
+                a.severidad === 'danger' ? '#ef4444' : a.severidad === 'warning_high' ? '#f97316' : a.severidad === 'warning_low' ? '#eab308' : '#3b82f6'
+              }; background-color: #f8fafc; border-radius: 0 8px 8px 0; list-style-type: none;">
+                <div style="font-weight: bold; color: #1e293b; font-size: 14px;">
+                  [ALERTA: ${a.tipo.toUpperCase()}]
+                </div>
+                <div style="color: #475569; font-size: 13px; margin-top: 4px;">
+                  ${a.mensaje}
+                </div>
+                <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">
+                  Fecha de referencia: ${a.fechaReferencia || 'N/A'}
+                </div>
+              </li>
+            `).join("");
+
+            const subject = `[ALERTA DE CONVENIO] Alertas vigentes para: ${c.codigo}`;
+            const html = `
+              <div style="font-family: sans-serif; max-width: 650px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+                <div style="border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-bottom: 20px;">
+                  <h2 style="color: #4f46e5; margin: 0; font-family: system-ui, sans-serif;">Sistema de Alertas de Convenios</h2>
+                  <p style="color: #64748b; font-size: 12px; margin: 5px 0 0 0;">Notificaciones automáticas de control de plazos</p>
+                </div>
+                
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">Estimado/a Responsable,</p>
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">Le informamos que el siguiente convenio bajo su supervisión cuenta con <strong>alertas de vencimiento o plazos activos</strong> que requieren de su revisión e intervención inmediata:</p>
+                
+                <div style="background-color: #f1f5f9; padding: 15px; border-radius: 10px; margin: 20px 0; border: 1px solid #e2e8f0;">
+                  <strong style="font-size: 16px; color: #0f172a;">${c.codigo} - ${c.titulo_proyecto}</strong><br/>
+                  <div style="color: #64748b; font-size: 13px; margin-top: 6px;">
+                    <strong>Director/Investigador:</strong> ${c.investigador_principal || 'No especificado'}<br/>
+                    <strong>No. Convenio:</strong> ${c.no_convenio || 'N/A'}
+                  </div>
+                </div>
+
+                <h3 style="color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-top: 25px;">Alertas Detectadas:</h3>
+                <ul style="padding-left: 0; margin-top: 15px;">
+                  ${alertsHtml}
+                </ul>
+
+                <p style="color: #4f46e5; font-size: 14px; font-weight: bold; margin-top: 25px;">
+                  👉 Por favor, ingrese al Gestor de Convenios para tramitar la adición, prórroga, póliza o registro correspondiente.
+                </p>
+
+                <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
+                <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Este mensaje fue enviado de manera automática por la plataforma de Gestión de Convenios de la Universidad.</p>
+              </div>
+            `;
+
+            const success = await sendEmail({ to: recipient, subject, html });
+            if (success) {
+              notifiedCount++;
+              details.push(`Notificado con éxito ${c.codigo} a ${recipient}`);
+            } else {
+              failedCount++;
+              details.push(`Error al enviar ${c.codigo} a ${recipient}`);
+            }
+          } else {
+            details.push(`Convenio ${c.codigo} tiene alertas pero no tiene correo responsable asignado`);
+          }
+        }
+      }
+
+      return res.json({ 
+        success: true, 
+        notifiedCount, 
+        failedCount,
+        details,
+        message: `Se han procesado las alertas. Enviados: ${notifiedCount}, Fallidos: ${failedCount}`
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al enviar notificaciones en lote: " + err.message });
+    }
+  });
+
+  // Auth: Me
+  app.get("/api/auth/me", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      return res.json({ user });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener perfil" });
+    }
+  });
+
+  // Convenios: Get all
+  app.get("/api/convenios", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const db = await getDb();
+      const list = await db.all("SELECT * FROM convenios ORDER BY id DESC");
+      
+      // Enriquecer convenios con sus alertas dinámicas
+      const todayStr = new Date().toISOString().split('T')[0];
+      
+      // Obtener alertas silenciadas por el usuario actual
+      const dismissed = await db.all("SELECT convenio_id, alert_key FROM dismissed_alerts WHERE user_id = ?", [user.id]);
+      const dismissedKeys = dismissed.map(d => `${d.convenio_id}:${d.alert_key}`);
+
+      const enriched = list.map(c => {
+        const keysForThis = dismissed
+          .filter(d => d.convenio_id === c.id)
+          .map(d => d.alert_key);
+        const alerts = computeAlertsForConvenio(c, todayStr, keysForThis);
+        return {
+          ...c,
+          alerts,
+          alertCount: alerts.length
+        };
+      });
+
+      return res.json(enriched);
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener convenios" });
+    }
+  });
+
+  // Convenios: Get single
+  app.get("/api/convenios/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const { id } = req.params;
+      const db = await getDb();
+      const convenio = await db.get("SELECT * FROM convenios WHERE id = ?", [id]);
+
+      if (!convenio) {
+        return res.status(404).json({ error: "Convenio no encontrado" });
+      }
+
+      const todayStr = new Date().toISOString().split('T')[0];
+      const dismissed = await db.all(
+        "SELECT alert_key FROM dismissed_alerts WHERE user_id = ? AND convenio_id = ?",
+        [user.id, id]
+      );
+      const dismissedKeys = dismissed.map(d => d.alert_key);
+
+      const alerts = computeAlertsForConvenio(convenio, todayStr, dismissedKeys);
+
+      return res.json({
+        ...convenio,
+        alerts,
+        dismissedAlerts: dismissedKeys
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener convenio" });
+    }
+  });
+
+  // Convenios: Create
+  app.post("/api/convenios", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const db = await getDb();
+      const fields = req.body;
+
+      if (!fields.codigo || !fields.titulo_proyecto) {
+        return res.status(400).json({ error: "Código y Título del Proyecto son obligatorios" });
+      }
+
+      // Check if code already exists
+      const existing = await db.get("SELECT id FROM convenios WHERE codigo = ?", [fields.codigo]);
+      if (existing) {
+        return res.status(400).json({ error: `El código de convenio '${fields.codigo}' ya existe.` });
+      }
+
+      const query = `
+        INSERT INTO convenios (
+          plan_servicio, correo_responsable, codigo, titulo_proyecto, no_convenio,
+          tipologia, facultad, programa, grupo, codigo_grupo, categoria,
+          investigador_principal, cedula, coinvestigador, valor, valor_letras,
+          duracion, disponibilidad_presupuestal, registro_presupuestal,
+          acta_aprobacion_poliza, fecha_inicio, fecha_terminacion, primer_informe,
+          fecha_suspension, fecha_reinicio, fecha_acta_aprobacion_ampliacion_poliza,
+          fecha_terminacion_ampliacion, segundo_informe, correo_investigador,
+          fecha_terminacion_prorroga
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      const params = [
+        fields.plan_servicio || null,
+        fields.correo_responsable || null,
+        fields.codigo,
+        fields.titulo_proyecto,
+        fields.no_convenio || null,
+        fields.tipologia || null,
+        fields.facultad || null,
+        fields.programa || null,
+        fields.grupo || null,
+        fields.codigo_grupo || null,
+        fields.categoria || null,
+        fields.investigador_principal || null,
+        fields.cedula || null,
+        fields.coinvestigador || null,
+        fields.valor ? parseFloat(fields.valor) : null,
+        fields.valor_letras || null,
+        fields.duracion || null,
+        fields.disponibilidad_presupuestal || null,
+        fields.registro_presupuestal || null,
+        fields.acta_aprobacion_poliza || null,
+        fields.fecha_inicio || null,
+        fields.fecha_terminacion || null,
+        fields.primer_informe || null,
+        fields.fecha_suspension || null,
+        fields.fecha_reinicio || null,
+        fields.fecha_acta_aprobacion_ampliacion_poliza || null,
+        fields.fecha_terminacion_ampliacion || null,
+        fields.segundo_informe || null,
+        fields.correo_investigador || null,
+        fields.fecha_terminacion_prorroga || null
+      ];
+
+      const result = await db.run(query, params);
+      const newConvenio = await db.get("SELECT * FROM convenios WHERE id = ?", [result.lastID]);
+
+      // Notify responsible by email
+      const recipient = fields.correo_responsable || fields.correo_investigador;
+      if (recipient && recipient.trim()) {
+        const subject = `[NUEVO CONVENIO] Registro de convenio ${fields.codigo}`;
+        const html = `
+          <div style="font-family: sans-serif; max-width: 650px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+            <div style="border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-bottom: 20px;">
+              <h2 style="color: #10b981; margin: 0; font-family: system-ui, sans-serif;">Gestor de Convenios</h2>
+              <p style="color: #64748b; font-size: 12px; margin: 5px 0 0 0;">Notificaciones automáticas de registro</p>
+            </div>
+            
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Estimado/a Responsable,</p>
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Le informamos que se ha registrado un nuevo convenio en la plataforma:</p>
+            
+            <div style="background-color: #f8fafc; padding: 15px; border-radius: 10px; border-left: 4px solid #10b981; margin: 20px 0; border: 1px solid #f1f5f9;">
+              <strong style="font-size: 16px; color: #0f172a;">${fields.codigo} - ${fields.titulo_proyecto}</strong><br/>
+              <span style="color: #64748b; font-size: 13px; display: block; margin-top: 4px;">No. Convenio: ${fields.no_convenio || 'N/A'} | Facultad: ${fields.facultad || 'N/A'}</span>
+            </div>
+
+            <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin: 20px 0; color: #334155;">
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; width: 40%; border-bottom: 1px solid #f1f5f9;">Investigador Principal:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${fields.investigador_principal || 'N/A'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Fecha de Inicio:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${fields.fecha_inicio || 'N/A'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Fecha de Terminación:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${fields.fecha_terminacion || 'N/A'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Valor Total:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #10b981; border-bottom: 1px solid #f1f5f9;">$${new Intl.NumberFormat('es-CO').format(fields.valor || 0)} COP</td>
+              </tr>
+            </table>
+
+            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
+            <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Este mensaje fue enviado de manera automática por la plataforma de Gestión de Convenios.</p>
+          </div>
+        `;
+        sendEmail({ to: recipient, subject, html }).catch(err => console.error("Error sending creation email", err));
+      }
+
+      return res.status(201).json(newConvenio);
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al crear convenio: " + err.message });
+    }
+  });
+
+  // Convenios: Update
+  app.put("/api/convenios/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const { id } = req.params;
+      const db = await getDb();
+      const fields = req.body;
+
+      const current = await db.get("SELECT id FROM convenios WHERE id = ?", [id]);
+      if (!current) {
+        return res.status(404).json({ error: "Convenio no encontrado" });
+      }
+
+      // Check code uniqueness if changing
+      if (fields.codigo) {
+        const existing = await db.get("SELECT id FROM convenios WHERE codigo = ? AND id != ?", [fields.codigo, id]);
+        if (existing) {
+          return res.status(400).json({ error: `El código '${fields.codigo}' ya está asignado a otro convenio.` });
+        }
+      }
+
+      const query = `
+        UPDATE convenios SET
+          plan_servicio = ?, correo_responsable = ?, codigo = ?, titulo_proyecto = ?,
+          no_convenio = ?, tipologia = ?, facultad = ?, programa = ?, grupo = ?,
+          codigo_grupo = ?, categoria = ?, investigador_principal = ?, cedula = ?,
+          coinvestigador = ?, valor = ?, valor_letras = ?, duracion = ?,
+          disponibilidad_presupuestal = ?, registro_presupuestal = ?,
+          acta_aprobacion_poliza = ?, fecha_inicio = ?, fecha_terminacion = ?,
+          primer_informe = ?, fecha_suspension = ?, fecha_reinicio = ?,
+          fecha_acta_aprobacion_ampliacion_poliza = ?, fecha_terminacion_ampliacion = ?,
+          segundo_informe = ?, correo_investigador = ?, fecha_terminacion_prorroga = ?
+        WHERE id = ?
+      `;
+
+      const params = [
+        fields.plan_servicio === undefined ? null : fields.plan_servicio,
+        fields.correo_responsable === undefined ? null : fields.correo_responsable,
+        fields.codigo,
+        fields.titulo_proyecto,
+        fields.no_convenio === undefined ? null : fields.no_convenio,
+        fields.tipologia === undefined ? null : fields.tipologia,
+        fields.facultad === undefined ? null : fields.facultad,
+        fields.programa === undefined ? null : fields.programa,
+        fields.grupo === undefined ? null : fields.grupo,
+        fields.codigo_grupo === undefined ? null : fields.codigo_grupo,
+        fields.categoria === undefined ? null : fields.categoria,
+        fields.investigador_principal === undefined ? null : fields.investigador_principal,
+        fields.cedula === undefined ? null : fields.cedula,
+        fields.coinvestigador === undefined ? null : fields.coinvestigador,
+        fields.valor === undefined || fields.valor === "" ? null : parseFloat(fields.valor),
+        fields.valor_letras === undefined ? null : fields.valor_letras,
+        fields.duracion === undefined ? null : fields.duracion,
+        fields.disponibilidad_presupuestal === undefined ? null : fields.disponibilidad_presupuestal,
+        fields.registro_presupuestal === undefined ? null : fields.registro_presupuestal,
+        fields.acta_aprobacion_poliza === undefined ? null : fields.acta_aprobacion_poliza,
+        fields.fecha_inicio === undefined ? null : fields.fecha_inicio,
+        fields.fecha_terminacion === undefined ? null : fields.fecha_terminacion,
+        fields.primer_informe === undefined ? null : fields.primer_informe,
+        fields.fecha_suspension === undefined ? null : fields.fecha_suspension,
+        fields.fecha_reinicio === undefined ? null : fields.fecha_reinicio,
+        fields.fecha_acta_aprobacion_ampliacion_poliza === undefined ? null : fields.fecha_acta_aprobacion_ampliacion_poliza,
+        fields.fecha_terminacion_ampliacion === undefined ? null : fields.fecha_terminacion_ampliacion,
+        fields.segundo_informe === undefined ? null : fields.segundo_informe,
+        fields.correo_investigador === undefined ? null : fields.correo_investigador,
+        fields.fecha_terminacion_prorroga === undefined ? null : fields.fecha_terminacion_prorroga,
+        id
+      ];
+
+      await db.run(query, params);
+      const updated = await db.get("SELECT * FROM convenios WHERE id = ?", [id]);
+
+      // Notify of update
+      const recipient = updated.correo_responsable || updated.correo_investigador;
+      if (recipient && recipient.trim()) {
+        const subject = `[ACTUALIZACIÓN] Convenio ${updated.codigo} actualizado`;
+        const html = `
+          <div style="font-family: sans-serif; max-width: 650px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+            <div style="border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-bottom: 20px;">
+              <h2 style="color: #3b82f6; margin: 0; font-family: system-ui, sans-serif;">Gestor de Convenios</h2>
+              <p style="color: #64748b; font-size: 12px; margin: 5px 0 0 0;">Notificaciones automáticas de actualización</p>
+            </div>
+            
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Estimado/a Responsable,</p>
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Le informamos que se han realizado modificaciones al convenio registrado en la plataforma:</p>
+            
+            <div style="background-color: #f8fafc; padding: 15px; border-radius: 10px; border-left: 4px solid #3b82f6; margin: 20px 0; border: 1px solid #f1f5f9;">
+              <strong style="font-size: 16px; color: #0f172a;">${updated.codigo} - ${updated.titulo_proyecto}</strong><br/>
+              <span style="color: #64748b; font-size: 13px; display: block; margin-top: 4px;">No. Convenio: ${updated.no_convenio || 'N/A'} | Facultad: ${updated.facultad || 'N/A'}</span>
+            </div>
+
+            <h3 style="color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-top: 25px;">Plazos y Estados Actualizados:</h3>
+            <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin: 20px 0; color: #334155;">
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; width: 45%; border-bottom: 1px solid #f1f5f9;">Término Original:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${updated.fecha_terminacion || 'N/A'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Término con Ampliación:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${updated.fecha_terminacion_ampliacion || 'Ninguna'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Término con Prórroga:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${updated.fecha_terminacion_prorroga || 'Ninguna'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Primer Informe de Avance:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${updated.primer_informe || 'N/A'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Segundo Informe:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${updated.segundo_informe || 'N/A'}</td>
+              </tr>
+            </table>
+
+            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
+            <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Este mensaje fue enviado de manera automática por la plataforma de Gestión de Convenios.</p>
+          </div>
+        `;
+        sendEmail({ to: recipient, subject, html }).catch(err => console.error("Error sending update email", err));
+      }
+
+      return res.json(updated);
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al actualizar convenio: " + err.message });
+    }
+  });
+
+  // Convenios: Delete
+  app.delete("/api/convenios/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const { id } = req.params;
+      const db = await getDb();
+
+      const current = await db.get("SELECT id FROM convenios WHERE id = ?", [id]);
+      if (!current) {
+        return res.status(404).json({ error: "Convenio no encontrado" });
+      }
+
+      await db.run("DELETE FROM convenios WHERE id = ?", [id]);
+      return res.json({ success: true, message: `Convenio con ID ${id} eliminado correctamente.` });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al eliminar convenio" });
+    }
+  });
+
+  // Alerts: Get all active alerts
+  app.get("/api/alerts", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const db = await getDb();
+      const list = await db.all("SELECT * FROM convenios");
+      const dismissed = await db.all("SELECT convenio_id, alert_key FROM dismissed_alerts WHERE user_id = ?", [user.id]);
+      const dismissedMap = new Map<number, string[]>();
+      
+      dismissed.forEach(d => {
+        if (!dismissedMap.has(d.convenio_id)) {
+          dismissedMap.set(d.convenio_id, []);
+        }
+        dismissedMap.get(d.convenio_id)!.push(d.alert_key);
+      });
+
+      const todayStr = new Date().toISOString().split('T')[0];
+      const allAlerts: any[] = [];
+
+      list.forEach(c => {
+        const keys = dismissedMap.get(c.id) || [];
+        const alertsForC = computeAlertsForConvenio(c, todayStr, keys);
+        allAlerts.push(...alertsForC);
+      });
+
+      // Sort by severity (danger first, then warning_high, warning_low, info)
+      const severityOrder: Record<string, number> = {
+        danger: 1,
+        warning_high: 2,
+        warning_low: 3,
+        info: 4
+      };
+
+      allAlerts.sort((a, b) => {
+        const orderA = severityOrder[a.severidad] || 5;
+        const orderB = severityOrder[b.severidad] || 5;
+        if (orderA !== orderB) return orderA - orderB;
+        if (a.diasRestantes === null && b.diasRestantes !== null) return 1;
+        if (a.diasRestantes !== null && b.diasRestantes === null) return -1;
+        if (a.diasRestantes !== null && b.diasRestantes !== null) return a.diasRestantes - b.diasRestantes;
+        return 0;
+      });
+
+      return res.json(allAlerts);
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener alertas" });
+    }
+  });
+
+  // Alerts: Dismiss an alert
+  app.post("/api/alerts/dismiss", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const { convenioId, alertKey } = req.body;
+      if (!convenioId || !alertKey) {
+        return res.status(400).json({ error: "convenioId y alertKey son obligatorios" });
+      }
+
+      const db = await getDb();
+      await db.run(
+        "INSERT OR IGNORE INTO dismissed_alerts (user_id, convenio_id, alert_key) VALUES (?, ?, ?)",
+        [user.id, convenioId, alertKey]
+      );
+
+      return res.json({ success: true, message: "Alerta silenciada correctamente" });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al silenciar alerta" });
+    }
+  });
+
+  // Convenios: Import/Seeding custom list
+  app.post("/api/convenios/import", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const db = await getDb();
+      const list = req.body;
+
+      if (!Array.isArray(list)) {
+        return res.status(400).json({ error: "Los datos a importar deben ser una lista (array)." });
+      }
+
+      let importedCount = 0;
+      let errorCount = 0;
+      const errors: string[] = [];
+
+      for (const item of list) {
+        try {
+          if (!item.codigo || !item.titulo_proyecto) {
+            errorCount++;
+            errors.push(`Convenio sin código o título omitido.`);
+            continue;
+          }
+
+          // Check unique
+          const existing = await db.get("SELECT id FROM convenios WHERE codigo = ?", [item.codigo]);
+          if (existing) {
+            errorCount++;
+            errors.push(`El código '${item.codigo}' ya existe.`);
+            continue;
+          }
+
+          const query = `
+            INSERT INTO convenios (
+              plan_servicio, correo_responsable, codigo, titulo_proyecto, no_convenio,
+              tipologia, facultad, programa, grupo, codigo_grupo, categoria,
+              investigador_principal, cedula, coinvestigador, valor, valor_letras,
+              duracion, disponibilidad_presupuestal, registro_presupuestal,
+              acta_aprobacion_poliza, fecha_inicio, fecha_terminacion, primer_informe,
+              fecha_suspension, fecha_reinicio, fecha_acta_aprobacion_ampliacion_poliza,
+              fecha_terminacion_ampliacion, segundo_informe, correo_investigador,
+              fecha_terminacion_prorroga
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `;
+
+          const params = [
+            item.plan_servicio || null,
+            item.correo_responsable || null,
+            item.codigo,
+            item.titulo_proyecto,
+            item.no_convenio || null,
+            item.tipologia || null,
+            item.facultad || null,
+            item.programa || null,
+            item.grupo || null,
+            item.codigo_grupo || null,
+            item.categoria || null,
+            item.investigador_principal || null,
+            item.cedula || null,
+            item.coinvestigador || null,
+            item.valor ? parseFloat(item.valor) : null,
+            item.valor_letras || null,
+            item.duracion || null,
+            item.disponibilidad_presupuestal || null,
+            item.registro_presupuestal || null,
+            item.acta_aprobacion_poliza || null,
+            item.fecha_inicio || null,
+            item.fecha_terminacion || null,
+            item.primer_informe || null,
+            item.fecha_suspension || null,
+            item.fecha_reinicio || null,
+            item.fecha_acta_aprobacion_ampliacion_poliza || null,
+            item.fecha_terminacion_ampliacion || null,
+            item.segundo_informe || null,
+            item.correo_investigador || null,
+            item.fecha_terminacion_prorroga || null
+          ];
+
+          await db.run(query, params);
+          importedCount++;
+        } catch (singleErr: any) {
+          errorCount++;
+          errors.push(`Error al importar '${item.codigo || "Desconocido"}': ${singleErr.message}`);
+        }
+      }
+
+      return res.json({
+        success: true,
+        importedCount,
+        errorCount,
+        errors
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error en proceso de importación: " + err.message });
+    }
+  });
+
+
+  // --- AUTOMATIC ALERTS SCHEDULER (BACKGROUND THREAD) ---
+
+  const runDailyAlertsCheck = async () => {
+    try {
+      console.log("[SCHEDULER] Iniciando chequeo diario automático de alertas de convenios...");
+      const db = await getDb();
+      const settings = await db.get("SELECT enabled, user FROM email_settings LIMIT 1");
+      if (!settings || !settings.enabled) {
+        console.log("[SCHEDULER] El envío automático está desactivado en la configuración de correo.");
+        return;
+      }
+
+      const list = await db.all("SELECT * FROM convenios");
+      const dismissed = await db.all("SELECT convenio_id, alert_key FROM dismissed_alerts");
+      const dismissedKeys = dismissed.map(d => `${d.convenio_id}:${d.alert_key}`);
+
+      const todayStr = new Date().toISOString().split('T')[0];
+      let sentCount = 0;
+
+      for (const c of list) {
+        const alerts = computeAlertsForConvenio(c, todayStr, dismissedKeys);
+        if (alerts.length > 0) {
+          const recipient = c.correo_responsable || c.correo_investigador;
+          if (recipient && recipient.trim()) {
+            const alertsHtml = alerts.map(a => `
+              <li style="margin-bottom: 12px; padding: 12px; border-left: 4px solid ${
+                a.severidad === 'danger' ? '#ef4444' : a.severidad === 'warning_high' ? '#f97316' : a.severidad === 'warning_low' ? '#eab308' : '#3b82f6'
+              }; background-color: #f8fafc; border-radius: 0 8px 8px 0; list-style-type: none;">
+                <div style="font-weight: bold; color: #1e293b; font-size: 14px;">
+                  [ALERTA: ${a.tipo.toUpperCase()}]
+                </div>
+                <div style="color: #475569; font-size: 13px; margin-top: 4px;">
+                  ${a.mensaje}
+                </div>
+                <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">
+                  Fecha de referencia: ${a.fechaReferencia || 'N/A'}
+                </div>
+              </li>
+            `).join("");
+
+            const subject = `[ALERTA DIARIA AUTOMÁTICA] Alertas de convenio: ${c.codigo}`;
+            const html = `
+              <div style="font-family: sans-serif; max-width: 650px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+                <div style="border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-bottom: 20px;">
+                  <h2 style="color: #4f46e5; margin: 0; font-family: system-ui, sans-serif;">Sistema de Alertas de Convenios</h2>
+                  <p style="color: #64748b; font-size: 12px; margin: 5px 0 0 0;">Control automático diario de plazos</p>
+                </div>
+                
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">Estimado/a Responsable,</p>
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">Este es un recordatorio automático diario. El siguiente convenio cuenta con <strong>alertas de vencimiento o plazos activos</strong> pendientes:</p>
+                
+                <div style="background-color: #f1f5f9; padding: 15px; border-radius: 10px; margin: 20px 0; border: 1px solid #e2e8f0;">
+                  <strong style="font-size: 16px; color: #0f172a;">${c.codigo} - ${c.titulo_proyecto}</strong><br/>
+                  <div style="color: #64748b; font-size: 13px; margin-top: 6px;">
+                    <strong>Director/Investigador:</strong> ${c.investigador_principal || 'No especificado'}<br/>
+                    <strong>No. Convenio:</strong> ${c.no_convenio || 'N/A'}
+                  </div>
+                </div>
+
+                <h3 style="color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-top: 25px;">Alertas Activas:</h3>
+                <ul style="padding-left: 0; margin-top: 15px;">
+                  ${alertsHtml}
+                </ul>
+
+                <p style="color: #4f46e5; font-size: 14px; font-weight: bold; margin-top: 25px;">
+                  👉 Por favor, ingrese al Gestor de Convenios para tramitar la adición, prórroga, póliza o registro correspondiente.
+                </p>
+
+                <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
+                <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Este mensaje fue enviado de manera automática por la plataforma de Gestión de Convenios. Por favor no responda a este correo.</p>
+              </div>
+            `;
+
+            const success = await sendEmail({ to: recipient, subject, html });
+            if (success) {
+              sentCount++;
+              console.log(`[SCHEDULER] Notificación enviada con éxito para ${c.codigo} a ${recipient}`);
+            } else {
+              console.error(`[SCHEDULER] Error al enviar notificación de ${c.codigo} a ${recipient}`);
+            }
+          }
+        }
+      }
+      console.log(`[SCHEDULER] Chequeo diario finalizado. Correos enviados de manera automática: ${sentCount}`);
+    } catch (error) {
+      console.error("[SCHEDULER] Error en el chequeo de alertas diario automático:", error);
+    }
+  };
+
+  const startEmailNotificationScheduler = () => {
+    // Run the scheduler every 24 hours
+    const getMsUntilNext8AM = () => {
+      const now = new Date();
+      const target = new Date();
+      target.setHours(8, 0, 0, 0); // Target is 8:00 AM
+      
+      if (now.getHours() >= 8) {
+        // If it is already past 8:00 AM, target tomorrow at 8:00 AM
+        target.setDate(target.getDate() + 1);
+      }
+      return target.getTime() - now.getTime();
+    };
+
+    const scheduleNextRun = () => {
+      const delay = getMsUntilNext8AM();
+      const targetTimeStr = new Date(Date.now() + delay).toLocaleString();
+      console.log(`[SCHEDULER] Próximo chequeo automático diario de alertas programado para: ${targetTimeStr} (en ${Math.round(delay / 1000 / 60)} minutos)`);
+      
+      setTimeout(async () => {
+        await runDailyAlertsCheck();
+        // Schedule next one
+        scheduleNextRun();
+      }, delay);
+    };
+
+    // Run an initial check 30 seconds after startup
+    setTimeout(() => {
+      console.log("[SCHEDULER] Ejecutando chequeo inicial de arranque para verificación inmediata...");
+      runDailyAlertsCheck().catch(err => console.error("[SCHEDULER] Error en chequeo inicial:", err));
+    }, 30000);
+
+    scheduleNextRun();
+  };
+
+  // Start the automated alert scheduler
+  startEmailNotificationScheduler();
+
+
+  // --- VITE MIDDLEWARE / STATIC ASSETS ---
+
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    // SPA routing - Express v4 route matches everything for SPA index.html serving
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
