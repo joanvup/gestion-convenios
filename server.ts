@@ -256,6 +256,121 @@ async function startServer() {
     }
   });
 
+  // Auth: Forgot Password (Request Code)
+  app.post("/api/auth/forgot-password", async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email) {
+        return res.status(400).json({ error: "Ingresa tu correo electrónico registrado" });
+      }
+
+      const db = await getDb();
+      const user = await db.get("SELECT id, email, name FROM users WHERE email = ?", [email.trim()]);
+
+      if (!user) {
+        return res.status(404).json({ error: "No se encontró ninguna cuenta asociada a este correo electrónico" });
+      }
+
+      // Generate 6-digit verification code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 minutes
+
+      // Store in DB
+      await db.run(
+        "INSERT INTO password_resets (email, code, expires_at, used) VALUES (?, ?, ?, 0)",
+        [user.email, code, expiresAt]
+      );
+
+      // Attempt sending email if SMTP is configured
+      const emailSent = await sendEmail({
+        to: user.email,
+        subject: "Código de recuperación de contraseña - Gestor de Convenios",
+        html: `
+          <div style="font-family: Arial, sans-serif; padding: 20px; color: #1e293b; max-width: 500px; margin: 0 auto; border: 1px solid #e2e8f0; rounded-xl: 12px;">
+            <h2 style="color: #4f46e5; margin-top: 0;">Restablecer contraseña</h2>
+            <p>Hola <strong>${user.name}</strong>,</p>
+            <p>Hemos recibido una solicitud para restablecer la contraseña de tu cuenta en el Sistema de Gestión de Convenios.</p>
+            <p>Tu código de verificación de 6 dígitos es:</p>
+            <div style="background: #f1f5f9; padding: 16px; font-size: 28px; font-weight: 800; letter-spacing: 6px; text-align: center; color: #0f172a; border-radius: 8px; margin: 20px 0; border: 1px solid #cbd5e1;">
+              ${code}
+            </div>
+            <p style="font-size: 13px; color: #64748b;">Este código expirará en 15 minutos.</p>
+            <p style="font-size: 13px; color: #64748b;">Si no solicitaste este cambio, puedes ignorar este mensaje de forma segura.</p>
+          </div>
+        `
+      });
+
+      await logAudit(db, user, "SOLICITUD_RECUPERACION", "user", user.id, `Código de recuperación generado para ${user.email}`);
+
+      return res.json({
+        success: true,
+        message: emailSent 
+          ? `Se ha enviado un código de verificación de 6 dígitos a ${user.email}.`
+          : `Se ha generado el código de verificación para ${user.email}.`,
+        emailSent,
+        code
+      });
+    } catch (err: any) {
+      console.error("Error en forgot-password:", err);
+      return res.status(500).json({ error: "Error interno al procesar la solicitud de recuperación" });
+    }
+  });
+
+  // Auth: Reset Password (Verify Code & Change Password)
+  app.post("/api/auth/reset-password", async (req, res) => {
+    try {
+      const { email, code, newPassword } = req.body;
+
+      if (!email || !code || !newPassword) {
+        return res.status(400).json({ error: "Todos los campos (correo, código y nueva contraseña) son requeridos" });
+      }
+
+      if (newPassword.trim().length < 6) {
+        return res.status(400).json({ error: "La nueva contraseña debe tener al menos 6 caracteres" });
+      }
+
+      const db = await getDb();
+
+      // Check for valid reset token
+      const resetRecord = await db.get(
+        "SELECT * FROM password_resets WHERE email = ? AND code = ? AND used = 0 ORDER BY id DESC LIMIT 1",
+        [email.trim(), code.trim()]
+      );
+
+      if (!resetRecord) {
+        return res.status(400).json({ error: "El código de verificación es incorrecto o ya fue utilizado" });
+      }
+
+      // Check expiration
+      if (new Date(resetRecord.expires_at).getTime() < Date.now()) {
+        return res.status(400).json({ error: "El código de verificación ha expirado (validez de 15 min). Solicita uno nuevo." });
+      }
+
+      // Update password
+      await db.run("UPDATE users SET password = ? WHERE email = ?", [newPassword.trim(), email.trim()]);
+
+      // Mark token as used
+      await db.run("UPDATE password_resets SET used = 1 WHERE id = ?", [resetRecord.id]);
+
+      await logAudit(
+        db,
+        { email: email.trim(), name: email.trim() },
+        "RESTABLECER_CONTRASEÑA",
+        "user",
+        email.trim(),
+        "Contraseña restablecida exitosamente mediante código de recuperación"
+      );
+
+      return res.json({
+        success: true,
+        message: "¡Contraseña actualizada con éxito! Ya puedes iniciar sesión con tu nueva clave."
+      });
+    } catch (err: any) {
+      console.error("Error en reset-password:", err);
+      return res.status(500).json({ error: "Error interno al restablecer la contraseña" });
+    }
+  });
+
   // Auth: Register (Restricted to Admins)
   app.post("/api/auth/register", async (req, res) => {
     try {

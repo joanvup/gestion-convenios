@@ -113,6 +113,18 @@ export async function getDb(): Promise<Database> {
     )
   `);
 
+  // Create Password Resets Table
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      code TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   // Create Planes de Servicio Table
   await dbInstance.exec(`
     CREATE TABLE IF NOT EXISTS planes_servicio (
