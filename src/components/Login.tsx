@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Mail, Lock, ShieldAlert, CheckCircle2, ArrowLeft, KeyRound, Info } from 'lucide-react';
+import { Mail, Lock, ShieldAlert, CheckCircle2, ArrowLeft, KeyRound, Info, Tag } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { APP_VERSION } from '../version';
 
 interface LoginProps {
   onLoginSuccess: (token: string, userData: any) => void;
@@ -151,9 +152,15 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           <div className="mx-auto h-12 w-12 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold text-xl shadow-md shadow-indigo-100">
             GC
           </div>
-          <h2 className="mt-5 text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
-            Gestor de Convenios
-          </h2>
+          <div className="mt-5 flex items-center justify-center gap-2">
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
+              Gestor de Convenios
+            </h2>
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/80 shadow-2xs">
+              <Tag className="w-3 h-3 text-indigo-500" />
+              v{APP_VERSION}
+            </span>
+          </div>
           <p className="mt-1.5 text-xs sm:text-sm text-slate-500 font-medium">
             {mode === 'login' && 'Ingresa tus credenciales para acceder'}
             {mode === 'forgot' && 'Recuperación de contraseña de usuario'}
@@ -399,6 +406,12 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           </form>
         )}
 
+        {/* Card Footer with Version */}
+        <div className="pt-3 border-t border-slate-100 text-center">
+          <p className="text-[11px] font-medium text-slate-400">
+            Sistema de Gestión de Convenios • <span className="font-semibold text-slate-600">v{APP_VERSION}</span>
+          </p>
+        </div>
       </div>
     </div>
   );
