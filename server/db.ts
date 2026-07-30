@@ -48,6 +48,9 @@ export async function getDb(): Promise<Database> {
       investigador_principal TEXT,
       cedula TEXT,
       coinvestigador TEXT,
+      responsable_proceso TEXT,
+      cedula_responsable_proceso TEXT,
+      correo_responsable_proceso TEXT,
       valor REAL,
       valor_letras TEXT,
       duracion TEXT,
@@ -95,6 +98,141 @@ export async function getDb(): Promise<Database> {
       enabled INTEGER NOT NULL DEFAULT 0
     )
   `);
+
+  // Create Audit Logs Table
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      user_name TEXT,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL DEFAULT 'convenio',
+      entity_id TEXT,
+      details TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Create Planes de Servicio Table
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS planes_servicio (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre TEXT UNIQUE NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Create Facultades Table
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS facultades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre TEXT UNIQUE NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Seed default Planes de Servicio if empty
+  const planesCount = await dbInstance.get('SELECT COUNT(*) as count FROM planes_servicio');
+  if (planesCount && (planesCount as any).count === 0) {
+    const defaultPlanes = [
+      'Investigación Básica',
+      'Convocatoria Interna',
+      'Transferencia Tecnológica',
+      'Fortalecimiento Institucional',
+      'Convocatoria Nacional de Ciencias',
+      'Desarrollo Rural',
+      'Innovación Tecnológica e Industrial',
+      'Desarrollo Ambiental Sostenible',
+      'Convocatoria de Tecnología Agro'
+    ];
+    for (const plan of defaultPlanes) {
+      await dbInstance.run('INSERT OR IGNORE INTO planes_servicio (nombre) VALUES (?)', [plan]);
+    }
+  }
+
+  // Seed default Facultades if empty
+  const facultadesCount = await dbInstance.get('SELECT COUNT(*) as count FROM facultades');
+  if (facultadesCount && (facultadesCount as any).count === 0) {
+    const defaultFacultades = [
+      'Facultad de Ingeniería',
+      'Facultad de Ciencias',
+      'Facultad de Ciencias Agrarias',
+      'Facultad de Ciencias Exactas y Naturales',
+      'Facultad de Ciencias de la Salud',
+      'Facultad de Ciencias Humanas y Sociales',
+      'Facultad de Ciencias Económicas y Administrativas',
+      'Facultad de Derecho y Ciencias Políticas',
+      'Facultad de Educación',
+      'Facultad de Ciencias de la Tierra'
+    ];
+    for (const fac of defaultFacultades) {
+      await dbInstance.run('INSERT OR IGNORE INTO facultades (nombre) VALUES (?)', [fac]);
+    }
+  }
+
+  // Create Tipologias Table
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS tipologias (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre TEXT UNIQUE NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Seed default Tipologias if empty
+  const tipologiasCount = await dbInstance.get('SELECT COUNT(*) as count FROM tipologias');
+  if (tipologiasCount && (tipologiasCount as any).count === 0) {
+    const defaultTipologias = [
+      'Convenio Marco',
+      'Convenio Específico',
+      'Acuerdo de Confidencialidad (NDA)',
+      'Convenio de Cooperación Académica',
+      'Convenio de Prácticas y Pasantías',
+      'Convenio de Investigación',
+      'Memorando de Entendimiento (MOU)',
+      'Convenio de Movilidad',
+      'Convenio de Cofinanciación'
+    ];
+    for (const tipo of defaultTipologias) {
+      await dbInstance.run('INSERT OR IGNORE INTO tipologias (nombre) VALUES (?)', [tipo]);
+    }
+  }
+
+  // Sync any distinct plan_servicio, facultad, or tipologia from convenios table into the master tables
+  try {
+    const existingPlanes = await dbInstance.all('SELECT DISTINCT plan_servicio FROM convenios WHERE plan_servicio IS NOT NULL AND TRIM(plan_servicio) != ""');
+    for (const row of existingPlanes) {
+      if (row.plan_servicio && row.plan_servicio.trim()) {
+        await dbInstance.run('INSERT OR IGNORE INTO planes_servicio (nombre) VALUES (?)', [row.plan_servicio.trim()]);
+      }
+    }
+
+    const existingFacultades = await dbInstance.all('SELECT DISTINCT facultad FROM convenios WHERE facultad IS NOT NULL AND TRIM(facultad) != ""');
+    for (const row of existingFacultades) {
+      if (row.facultad && row.facultad.trim()) {
+        await dbInstance.run('INSERT OR IGNORE INTO facultades (nombre) VALUES (?)', [row.facultad.trim()]);
+      }
+    }
+
+    const existingTipologias = await dbInstance.all('SELECT DISTINCT tipologia FROM convenios WHERE tipologia IS NOT NULL AND TRIM(tipologia) != ""');
+    for (const row of existingTipologias) {
+      if (row.tipologia && row.tipologia.trim()) {
+        await dbInstance.run('INSERT OR IGNORE INTO tipologias (nombre) VALUES (?)', [row.tipologia.trim()]);
+      }
+    }
+  } catch (syncErr) {
+    console.error('Error syncing initial catalog from convenios:', syncErr);
+  }
+
+  // Ensure new columns exist on existing DBs
+  try { await dbInstance.exec('ALTER TABLE convenios ADD COLUMN responsable_proceso TEXT;'); } catch (e) {}
+  try { await dbInstance.exec('ALTER TABLE convenios ADD COLUMN cedula_responsable_proceso TEXT;'); } catch (e) {}
+  try { await dbInstance.exec('ALTER TABLE convenios ADD COLUMN correo_responsable_proceso TEXT;'); } catch (e) {}
+
+  // Sync existing coinvestigador values to responsable_proceso if empty
+  try {
+    await dbInstance.exec('UPDATE convenios SET responsable_proceso = coinvestigador WHERE (responsable_proceso IS NULL OR responsable_proceso = "") AND coinvestigador IS NOT NULL AND coinvestigador != "";');
+  } catch (e) {}
 
   // Seed default settings if empty
   const settingsCount = await dbInstance.get('SELECT COUNT(*) as count FROM email_settings');

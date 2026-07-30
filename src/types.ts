@@ -33,6 +33,9 @@ export interface Convenio {
   investigador_principal: string | null;
   cedula: string | null;
   coinvestigador: string | null;
+  responsable_proceso: string | null;
+  cedula_responsable_proceso: string | null;
+  correo_responsable_proceso: string | null;
   valor: number | null;
   valor_letras: string | null;
   duracion: string | null;
@@ -52,4 +55,15 @@ export interface Convenio {
   created_at?: string;
   alerts?: Alerta[];
   alertCount?: number;
+}
+
+export interface AuditLog {
+  id: number;
+  user_email: string;
+  user_name: string | null;
+  action: 'CREACION' | 'EDICION' | 'ELIMINACION' | 'IMPORTACION' | string;
+  entity_type: string;
+  entity_id: string | null;
+  details: string;
+  created_at: string;
 }

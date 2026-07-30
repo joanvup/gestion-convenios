@@ -25,6 +25,27 @@ async function startServer() {
     return user || null;
   };
 
+  // Helper to log audit events
+  const logAudit = async (db: any, user: any, action: string, entityType: string, entityId: string | number, details: string) => {
+    try {
+      await db.run(
+        `INSERT INTO audit_logs (user_email, user_name, action, entity_type, entity_id, details, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          user?.email || 'sistema@local',
+          user?.name || user?.email || 'Usuario',
+          action,
+          entityType,
+          String(entityId || ''),
+          details,
+          new Date().toISOString()
+        ]
+      );
+    } catch (err) {
+      console.error('Error logging audit event:', err);
+    }
+  };
+
   // Helper to compute alerts for a single convenio
   const computeAlertsForConvenio = (c: any, todayStr: string, dismissedKeys: string[] = []) => {
     const alerts: any[] = [];
@@ -326,12 +347,16 @@ async function startServer() {
     }
   });
 
-  // Email Settings: Get current config
+  // Email Settings: Get current config (Restricted to Admins)
   app.get("/api/email-settings", async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
       if (!user) {
         return res.status(401).json({ error: "No autorizado" });
+      }
+
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Acceso denegado. Se requieren permisos de administrador." });
       }
 
       const db = await getDb();
@@ -351,12 +376,16 @@ async function startServer() {
     }
   });
 
-  // Email Settings: Update config
+  // Email Settings: Update config (Restricted to Admins)
   app.post("/api/email-settings", async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
       if (!user) {
         return res.status(401).json({ error: "No autorizado" });
+      }
+
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Acceso denegado. Se requieren permisos de administrador." });
       }
 
       const { host, port, secure, user: emailUser, pass, sender_name, enabled } = req.body;
@@ -383,12 +412,16 @@ async function startServer() {
     }
   });
 
-  // Email Settings: Send a test email on-the-fly
+  // Email Settings: Send a test email on-the-fly (Restricted to Admins)
   app.post("/api/email-settings/test", async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
       if (!user) {
         return res.status(401).json({ error: "No autorizado" });
+      }
+
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Acceso denegado. Se requieren permisos de administrador." });
       }
 
       const { host, port, secure, user: emailUser, pass, sender_name, to } = req.body;
@@ -672,13 +705,14 @@ async function startServer() {
         INSERT INTO convenios (
           plan_servicio, correo_responsable, codigo, titulo_proyecto, no_convenio,
           tipologia, facultad, programa, grupo, codigo_grupo, categoria,
-          investigador_principal, cedula, coinvestigador, valor, valor_letras,
+          investigador_principal, cedula, coinvestigador, responsable_proceso,
+          cedula_responsable_proceso, correo_responsable_proceso, valor, valor_letras,
           duracion, disponibilidad_presupuestal, registro_presupuestal,
           acta_aprobacion_poliza, fecha_inicio, fecha_terminacion, primer_informe,
           fecha_suspension, fecha_reinicio, fecha_acta_aprobacion_ampliacion_poliza,
           fecha_terminacion_ampliacion, segundo_informe, correo_investigador,
           fecha_terminacion_prorroga
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
 
       const params = [
@@ -695,7 +729,10 @@ async function startServer() {
         fields.categoria || null,
         fields.investigador_principal || null,
         fields.cedula || null,
-        fields.coinvestigador || null,
+        fields.responsable_proceso || fields.coinvestigador || null,
+        fields.responsable_proceso || fields.coinvestigador || null,
+        fields.cedula_responsable_proceso || null,
+        fields.correo_responsable_proceso || null,
         fields.valor ? parseFloat(fields.valor) : null,
         fields.valor_letras || null,
         fields.duracion || null,
@@ -717,9 +754,11 @@ async function startServer() {
       const result = await db.run(query, params);
       const newConvenio = await db.get("SELECT * FROM convenios WHERE id = ?", [result.lastID]);
 
-      // Notify responsible by email
-      const recipient = fields.correo_responsable || fields.correo_investigador;
-      if (recipient && recipient.trim()) {
+      // Notify responsibles by email
+      const rawRecipients = [fields.correo_investigador, fields.correo_responsable_proceso];
+      const recipients = Array.from(new Set(rawRecipients.filter((r): r is string => Boolean(r && r.trim())).map(r => r.trim())));
+
+      if (recipients.length > 0) {
         const subject = `[NUEVO CONVENIO] Registro de convenio ${fields.codigo}`;
         const html = `
           <div style="font-family: sans-serif; max-width: 650px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
@@ -742,6 +781,10 @@ async function startServer() {
                 <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${fields.investigador_principal || 'N/A'}</td>
               </tr>
               <tr>
+                <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Responsable del Proceso:</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${fields.responsable_proceso || fields.coinvestigador || 'N/A'}</td>
+              </tr>
+              <tr>
                 <td style="padding: 8px 0; color: #64748b; border-bottom: 1px solid #f1f5f9;">Fecha de Inicio:</td>
                 <td style="padding: 8px 0; font-weight: bold; color: #1e293b; border-bottom: 1px solid #f1f5f9;">${fields.fecha_inicio || 'N/A'}</td>
               </tr>
@@ -759,8 +802,12 @@ async function startServer() {
             <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Este mensaje fue enviado de manera automática por la plataforma de Gestión de Convenios.</p>
           </div>
         `;
-        sendEmail({ to: recipient, subject, html }).catch(err => console.error("Error sending creation email", err));
+        for (const recipient of recipients) {
+          sendEmail({ to: recipient, subject, html }).catch(err => console.error("Error sending creation email to " + recipient, err));
+        }
       }
+
+      await logAudit(db, user, 'CREACION', 'convenio', newConvenio.id, `Creación de convenio ${newConvenio.codigo} - ${newConvenio.titulo_proyecto}`);
 
       return res.status(201).json(newConvenio);
     } catch (err: any) {
@@ -799,7 +846,8 @@ async function startServer() {
           plan_servicio = ?, correo_responsable = ?, codigo = ?, titulo_proyecto = ?,
           no_convenio = ?, tipologia = ?, facultad = ?, programa = ?, grupo = ?,
           codigo_grupo = ?, categoria = ?, investigador_principal = ?, cedula = ?,
-          coinvestigador = ?, valor = ?, valor_letras = ?, duracion = ?,
+          coinvestigador = ?, responsable_proceso = ?, cedula_responsable_proceso = ?,
+          correo_responsable_proceso = ?, valor = ?, valor_letras = ?, duracion = ?,
           disponibilidad_presupuestal = ?, registro_presupuestal = ?,
           acta_aprobacion_poliza = ?, fecha_inicio = ?, fecha_terminacion = ?,
           primer_informe = ?, fecha_suspension = ?, fecha_reinicio = ?,
@@ -822,7 +870,10 @@ async function startServer() {
         fields.categoria === undefined ? null : fields.categoria,
         fields.investigador_principal === undefined ? null : fields.investigador_principal,
         fields.cedula === undefined ? null : fields.cedula,
-        fields.coinvestigador === undefined ? null : fields.coinvestigador,
+        fields.responsable_proceso || fields.coinvestigador || null,
+        fields.responsable_proceso || fields.coinvestigador || null,
+        fields.cedula_responsable_proceso === undefined ? null : fields.cedula_responsable_proceso,
+        fields.correo_responsable_proceso === undefined ? null : fields.correo_responsable_proceso,
         fields.valor === undefined || fields.valor === "" ? null : parseFloat(fields.valor),
         fields.valor_letras === undefined ? null : fields.valor_letras,
         fields.duracion === undefined ? null : fields.duracion,
@@ -846,8 +897,10 @@ async function startServer() {
       const updated = await db.get("SELECT * FROM convenios WHERE id = ?", [id]);
 
       // Notify of update
-      const recipient = updated.correo_responsable || updated.correo_investigador;
-      if (recipient && recipient.trim()) {
+      const rawRecipients = [updated.correo_investigador, updated.correo_responsable_proceso];
+      const recipients = Array.from(new Set(rawRecipients.filter((r): r is string => Boolean(r && r.trim())).map(r => r.trim())));
+
+      if (recipients.length > 0) {
         const subject = `[ACTUALIZACIÓN] Convenio ${updated.codigo} actualizado`;
         const html = `
           <div style="font-family: sans-serif; max-width: 650px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
@@ -892,8 +945,12 @@ async function startServer() {
             <p style="font-size: 11px; color: #94a3b8; text-align: center; margin: 0;">Este mensaje fue enviado de manera automática por la plataforma de Gestión de Convenios.</p>
           </div>
         `;
-        sendEmail({ to: recipient, subject, html }).catch(err => console.error("Error sending update email", err));
+        for (const recipient of recipients) {
+          sendEmail({ to: recipient, subject, html }).catch(err => console.error("Error sending update email to " + recipient, err));
+        }
       }
+
+      await logAudit(db, user, 'EDICION', 'convenio', updated.id, `Edición de convenio ${updated.codigo} - ${updated.titulo_proyecto}`);
 
       return res.json(updated);
     } catch (err: any) {
@@ -913,12 +970,14 @@ async function startServer() {
       const { id } = req.params;
       const db = await getDb();
 
-      const current = await db.get("SELECT id FROM convenios WHERE id = ?", [id]);
+      const current = await db.get("SELECT id, codigo, titulo_proyecto FROM convenios WHERE id = ?", [id]);
       if (!current) {
         return res.status(404).json({ error: "Convenio no encontrado" });
       }
 
       await db.run("DELETE FROM convenios WHERE id = ?", [id]);
+      await logAudit(db, user, 'ELIMINACION', 'convenio', id, `Eliminación de convenio ${current.codigo} - ${current.titulo_proyecto}`);
+
       return res.json({ success: true, message: `Convenio con ID ${id} eliminado correctamente.` });
     } catch (err: any) {
       console.error(err);
@@ -1045,13 +1104,14 @@ async function startServer() {
             INSERT INTO convenios (
               plan_servicio, correo_responsable, codigo, titulo_proyecto, no_convenio,
               tipologia, facultad, programa, grupo, codigo_grupo, categoria,
-              investigador_principal, cedula, coinvestigador, valor, valor_letras,
+              investigador_principal, cedula, coinvestigador, responsable_proceso,
+              cedula_responsable_proceso, correo_responsable_proceso, valor, valor_letras,
               duracion, disponibilidad_presupuestal, registro_presupuestal,
               acta_aprobacion_poliza, fecha_inicio, fecha_terminacion, primer_informe,
               fecha_suspension, fecha_reinicio, fecha_acta_aprobacion_ampliacion_poliza,
               fecha_terminacion_ampliacion, segundo_informe, correo_investigador,
               fecha_terminacion_prorroga
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `;
 
           const params = [
@@ -1069,6 +1129,9 @@ async function startServer() {
             item.investigador_principal || null,
             item.cedula || null,
             item.coinvestigador || null,
+            item.responsable_proceso || item.coinvestigador || null,
+            item.cedula_responsable_proceso || null,
+            item.correo_responsable_proceso || null,
             item.valor ? parseFloat(item.valor) : null,
             item.valor_letras || null,
             item.duracion || null,
@@ -1095,6 +1158,10 @@ async function startServer() {
         }
       }
 
+      if (importedCount > 0) {
+        await logAudit(db, user, 'IMPORTACION', 'convenio', 'batch', `Importación masiva: ${importedCount} convenios creados exitosamente`);
+      }
+
       return res.json({
         success: true,
         importedCount,
@@ -1104,6 +1171,388 @@ async function startServer() {
     } catch (err: any) {
       console.error(err);
       return res.status(500).json({ error: "Error en proceso de importación: " + err.message });
+    }
+  });
+
+  // GET /api/audit-logs (Admin only) - Last 20 DB changes
+  app.get("/api/audit-logs", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const db = await getDb();
+      const logs = await db.all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 20");
+      return res.json({ logs });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al consultar logs de auditoría: " + err.message });
+    }
+  });
+
+  // POST /api/admin/reset-database (Admin only) - Reset database to blank state
+  app.post("/api/admin/reset-database", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador para inicializar la base de datos" });
+      }
+
+      const db = await getDb();
+
+      // Clear all convenios and dismissed alerts
+      await db.run("DELETE FROM convenios");
+      await db.run("DELETE FROM dismissed_alerts");
+      await db.run("DELETE FROM audit_logs");
+
+      // Log audit action as the first entry in fresh audit log
+      await logAudit(
+        db,
+        user,
+        'RESET_BD',
+        'sistema',
+        'database',
+        `Inicialización de base de datos en blanco por el administrador ${user.name || user.email}`
+      );
+
+      return res.json({
+        success: true,
+        message: "La base de datos se ha inicializado en blanco exitosamente."
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al inicializar la base de datos: " + err.message });
+    }
+  });
+
+
+  // --- CATALOG API ENDPOINTS: PLANES DE SERVICIO ---
+
+  // GET /api/planes_servicio
+  app.get("/api/planes_servicio", async (req, res) => {
+    try {
+      const db = await getDb();
+      const planes = await db.all("SELECT id, nombre FROM planes_servicio ORDER BY nombre ASC");
+      return res.json({ planes });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener planes de servicio" });
+    }
+  });
+
+  // POST /api/planes_servicio (Admin only)
+  app.post("/api/planes_servicio", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { nombre } = req.body;
+      if (!nombre || !nombre.trim()) {
+        return res.status(400).json({ error: "El nombre del plan de servicio es obligatorio" });
+      }
+
+      const db = await getDb();
+      const trimmed = nombre.trim();
+      const existing = await db.get("SELECT id FROM planes_servicio WHERE LOWER(nombre) = LOWER(?)", [trimmed]);
+      if (existing) {
+        return res.status(400).json({ error: "Ya existe un plan de servicio con este nombre" });
+      }
+
+      const result = await db.run("INSERT INTO planes_servicio (nombre) VALUES (?)", [trimmed]);
+      return res.json({ id: result.lastID, nombre: trimmed });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al crear plan de servicio: " + err.message });
+    }
+  });
+
+  // PUT /api/planes_servicio/:id (Admin only)
+  app.put("/api/planes_servicio/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { id } = req.params;
+      const { nombre } = req.body;
+      if (!nombre || !nombre.trim()) {
+        return res.status(400).json({ error: "El nombre del plan de servicio es obligatorio" });
+      }
+
+      const db = await getDb();
+      const current = await db.get("SELECT id, nombre FROM planes_servicio WHERE id = ?", [id]);
+      if (!current) {
+        return res.status(404).json({ error: "Plan de servicio no encontrado" });
+      }
+
+      const trimmed = nombre.trim();
+      const duplicate = await db.get("SELECT id FROM planes_servicio WHERE LOWER(nombre) = LOWER(?) AND id != ?", [trimmed, id]);
+      if (duplicate) {
+        return res.status(400).json({ error: "Ya existe otro plan de servicio con este nombre" });
+      }
+
+      const oldName = current.nombre;
+      await db.run("UPDATE planes_servicio SET nombre = ? WHERE id = ?", [trimmed, id]);
+      // Update existing convenios that reference the old name
+      await db.run("UPDATE convenios SET plan_servicio = ? WHERE plan_servicio = ?", [trimmed, oldName]);
+
+      return res.json({ success: true, id: Number(id), nombre: trimmed });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al actualizar plan de servicio: " + err.message });
+    }
+  });
+
+  // DELETE /api/planes_servicio/:id (Admin only)
+  app.delete("/api/planes_servicio/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { id } = req.params;
+      const db = await getDb();
+      await db.run("DELETE FROM planes_servicio WHERE id = ?", [id]);
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al eliminar plan de servicio: " + err.message });
+    }
+  });
+
+
+  // --- CATALOG API ENDPOINTS: FACULTADES RESPONSABLES ---
+
+  // GET /api/facultades
+  app.get("/api/facultades", async (req, res) => {
+    try {
+      const db = await getDb();
+      const facultades = await db.all("SELECT id, nombre FROM facultades ORDER BY nombre ASC");
+      return res.json({ facultades });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener facultades" });
+    }
+  });
+
+  // POST /api/facultades (Admin only)
+  app.post("/api/facultades", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { nombre } = req.body;
+      if (!nombre || !nombre.trim()) {
+        return res.status(400).json({ error: "El nombre de la facultad es obligatorio" });
+      }
+
+      const db = await getDb();
+      const trimmed = nombre.trim();
+      const existing = await db.get("SELECT id FROM facultades WHERE LOWER(nombre) = LOWER(?)", [trimmed]);
+      if (existing) {
+        return res.status(400).json({ error: "Ya existe una facultad con este nombre" });
+      }
+
+      const result = await db.run("INSERT INTO facultades (nombre) VALUES (?)", [trimmed]);
+      return res.json({ id: result.lastID, nombre: trimmed });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al crear facultad: " + err.message });
+    }
+  });
+
+  // PUT /api/facultades/:id (Admin only)
+  app.put("/api/facultades/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { id } = req.params;
+      const { nombre } = req.body;
+      if (!nombre || !nombre.trim()) {
+        return res.status(400).json({ error: "El nombre de la facultad es obligatorio" });
+      }
+
+      const db = await getDb();
+      const current = await db.get("SELECT id, nombre FROM facultades WHERE id = ?", [id]);
+      if (!current) {
+        return res.status(404).json({ error: "Facultad no encontrada" });
+      }
+
+      const trimmed = nombre.trim();
+      const duplicate = await db.get("SELECT id FROM facultades WHERE LOWER(nombre) = LOWER(?) AND id != ?", [trimmed, id]);
+      if (duplicate) {
+        return res.status(400).json({ error: "Ya existe otra facultad con este nombre" });
+      }
+
+      const oldName = current.nombre;
+      await db.run("UPDATE facultades SET nombre = ? WHERE id = ?", [trimmed, id]);
+      // Update existing convenios that reference the old name
+      await db.run("UPDATE convenios SET facultad = ? WHERE facultad = ?", [trimmed, oldName]);
+
+      return res.json({ success: true, id: Number(id), nombre: trimmed });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al actualizar facultad: " + err.message });
+    }
+  });
+
+  // DELETE /api/facultades/:id (Admin only)
+  app.delete("/api/facultades/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { id } = req.params;
+      const db = await getDb();
+      await db.run("DELETE FROM facultades WHERE id = ?", [id]);
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al eliminar facultad: " + err.message });
+    }
+  });
+
+
+  // --- CATALOG API ENDPOINTS: TIPOLOGÍAS DE CONVENIO ---
+
+  // GET /api/tipologias
+  app.get("/api/tipologias", async (req, res) => {
+    try {
+      const db = await getDb();
+      const tipologias = await db.all("SELECT id, nombre FROM tipologias ORDER BY nombre ASC");
+      return res.json({ tipologias });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener tipologías" });
+    }
+  });
+
+  // POST /api/tipologias (Admin only)
+  app.post("/api/tipologias", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { nombre } = req.body;
+      if (!nombre || !nombre.trim()) {
+        return res.status(400).json({ error: "El nombre de la tipología es obligatorio" });
+      }
+
+      const db = await getDb();
+      const trimmed = nombre.trim();
+      const existing = await db.get("SELECT id FROM tipologias WHERE LOWER(nombre) = LOWER(?)", [trimmed]);
+      if (existing) {
+        return res.status(400).json({ error: "Ya existe una tipología con este nombre" });
+      }
+
+      const result = await db.run("INSERT INTO tipologias (nombre) VALUES (?)", [trimmed]);
+      return res.json({ id: result.lastID, nombre: trimmed });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al crear tipología: " + err.message });
+    }
+  });
+
+  // PUT /api/tipologias/:id (Admin only)
+  app.put("/api/tipologias/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { id } = req.params;
+      const { nombre } = req.body;
+      if (!nombre || !nombre.trim()) {
+        return res.status(400).json({ error: "El nombre de la tipología es obligatorio" });
+      }
+
+      const db = await getDb();
+      const current = await db.get("SELECT id, nombre FROM tipologias WHERE id = ?", [id]);
+      if (!current) {
+        return res.status(404).json({ error: "Tipología no encontrada" });
+      }
+
+      const trimmed = nombre.trim();
+      const duplicate = await db.get("SELECT id FROM tipologias WHERE LOWER(nombre) = LOWER(?) AND id != ?", [trimmed, id]);
+      if (duplicate) {
+        return res.status(400).json({ error: "Ya existe otra tipología con este nombre" });
+      }
+
+      const oldName = current.nombre;
+      await db.run("UPDATE tipologias SET nombre = ? WHERE id = ?", [trimmed, id]);
+      // Update existing convenios that reference the old name
+      await db.run("UPDATE convenios SET tipologia = ? WHERE tipologia = ?", [trimmed, oldName]);
+
+      return res.json({ success: true, id: Number(id), nombre: trimmed });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al actualizar tipología: " + err.message });
+    }
+  });
+
+  // DELETE /api/tipologias/:id (Admin only)
+  app.delete("/api/tipologias/:id", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { id } = req.params;
+      const db = await getDb();
+      await db.run("DELETE FROM tipologias WHERE id = ?", [id]);
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al eliminar tipología: " + err.message });
     }
   });
 
@@ -1130,8 +1579,10 @@ async function startServer() {
       for (const c of list) {
         const alerts = computeAlertsForConvenio(c, todayStr, dismissedKeys);
         if (alerts.length > 0) {
-          const recipient = c.correo_responsable || c.correo_investigador;
-          if (recipient && recipient.trim()) {
+          const rawRecipients = [c.correo_investigador, c.correo_responsable_proceso];
+          const recipients = Array.from(new Set(rawRecipients.filter((r): r is string => Boolean(r && r.trim())).map(r => r.trim())));
+
+          for (const recipient of recipients) {
             const alertsHtml = alerts.map(a => `
               <li style="margin-bottom: 12px; padding: 12px; border-left: 4px solid ${
                 a.severidad === 'danger' ? '#ef4444' : a.severidad === 'warning_high' ? '#f97316' : a.severidad === 'warning_low' ? '#eab308' : '#3b82f6'
@@ -1163,6 +1614,7 @@ async function startServer() {
                   <strong style="font-size: 16px; color: #0f172a;">${c.codigo} - ${c.titulo_proyecto}</strong><br/>
                   <div style="color: #64748b; font-size: 13px; margin-top: 6px;">
                     <strong>Director/Investigador:</strong> ${c.investigador_principal || 'No especificado'}<br/>
+                    <strong>Responsable del Proceso:</strong> ${c.responsable_proceso || c.coinvestigador || 'No especificado'}<br/>
                     <strong>No. Convenio:</strong> ${c.no_convenio || 'N/A'}
                   </div>
                 </div>

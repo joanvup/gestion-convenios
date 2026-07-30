@@ -134,7 +134,6 @@ export default function ConvenioDetailModal({ convenio, onClose, onEdit, canEdit
               {renderField('Tipología', convenio.tipologia)}
               {renderField('Facultad Responsable', convenio.facultad)}
               {renderField('Programa Académico', convenio.programa)}
-              {renderField('Correo Electrónico del Área Responsable', convenio.correo_responsable)}
             </div>
           )}
 
@@ -142,11 +141,13 @@ export default function ConvenioDetailModal({ convenio, onClose, onEdit, canEdit
             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
               {renderField('Investigador Principal', convenio.investigador_principal)}
               {renderField('Documento de Identidad (Cédula)', convenio.cedula)}
-              {renderField('Correo del Investigador', convenio.correo_investigador)}
-              {renderField('Coinvestigador', convenio.coinvestigador)}
-              {renderField('Grupo de Investigación', convenio.grupo)}
-              {renderField('Código del Grupo', convenio.codigo_grupo)}
-              {renderField('Categoría del Grupo', convenio.categoria)}
+              {renderField('Correo del Investigador Principal', convenio.correo_investigador)}
+              {renderField('Responsable del Proceso', convenio.responsable_proceso || convenio.coinvestigador)}
+              {renderField('Cédula/Documento Responsable del Proceso', convenio.cedula_responsable_proceso)}
+              {renderField('Correo Responsable del Proceso', convenio.correo_responsable_proceso)}
+              {renderField('Grupo/Semillero/Jóvenes', convenio.grupo)}
+              {renderField('Código del Grupo/Semillero/Jóvenes', convenio.codigo_grupo)}
+              {renderField('Categoría del Grupo/Semillero/Jóvenes', convenio.categoria)}
             </div>
           )}
 

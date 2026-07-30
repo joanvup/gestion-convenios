@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mail, Lock, User as UserIcon, ShieldAlert, CheckCircle2 } from 'lucide-react';
+import { Mail, Lock, ShieldAlert, CheckCircle2 } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface LoginProps {
@@ -37,17 +37,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     } finally {
       setLoading(false);
     }
-  };
-
-  const loadDemoCredentials = (role: 'admin' | 'user') => {
-    if (role === 'admin') {
-      setEmail('admin@convenios.com');
-      setPassword('admin123');
-    } else {
-      setEmail('joan.fuentes@colegiobilingue.edu.co');
-      setPassword('convenios2026');
-    }
-    setError('');
   };
 
   return (
@@ -139,31 +128,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           <p className="text-xs text-slate-400">
             ¿No tienes cuenta? Solicita tu registro al <span className="font-semibold text-slate-600">Administrador</span>.
           </p>
-        </div>
-
-        {/* Demo Credentials Helper Box */}
-        <div className="pt-4 border-t border-slate-100 mt-6">
-          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2.5 text-center">
-            Acceso Rápido de Prueba (Demo)
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => loadDemoCredentials('user')}
-              className="px-3 py-2 bg-slate-50 border border-slate-200 hover:bg-slate-100 active:bg-slate-200 rounded-lg text-left text-xs transition-all"
-            >
-              <span className="block font-semibold text-slate-700">Usuario Demo</span>
-              <span className="block text-slate-500 truncate">joan.fuentes@colegiobilingue.edu.co</span>
-              <span className="block text-[10px] text-indigo-600 font-mono mt-0.5">Clave: convenios2026</span>
-            </button>
-            <button
-              onClick={() => loadDemoCredentials('admin')}
-              className="px-3 py-2 bg-slate-50 border border-slate-200 hover:bg-slate-100 active:bg-slate-200 rounded-lg text-left text-xs transition-all"
-            >
-              <span className="block font-semibold text-slate-700">Administrador</span>
-              <span className="block text-slate-500 truncate">admin@convenios.com</span>
-              <span className="block text-[10px] text-indigo-600 font-mono mt-0.5">Clave: admin123</span>
-            </button>
-          </div>
         </div>
       </div>
     </div>

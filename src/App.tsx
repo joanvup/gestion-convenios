@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { 
   Plus, Search, Filter, LogOut, Download, AlertCircle, RefreshCw, 
   Trash2, Edit, Eye, ShieldAlert, AlertTriangle, Info, Check, Calendar, ListTodo,
-  Users, Shield, Mail, Send
+  Users, Shield, Mail, Send, Database, FileDown, History
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User, Convenio, Alerta } from './types';
@@ -15,6 +15,11 @@ import TimelineView from './components/TimelineView';
 import ImportModal from './components/ImportModal';
 import UserManagement from './components/UserManagement';
 import EmailConfig from './components/EmailConfig';
+import CatalogManagement from './components/CatalogManagement';
+import AuditLogs from './components/AuditLogs';
+import ResetDatabaseModal from './components/ResetDatabaseModal';
+import ExpiredToast from './components/ExpiredToast';
+import { generateConveniosPDF } from './utils/pdfExport';
 
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -24,11 +29,13 @@ export default function App() {
   const [alerts, setAlerts] = useState<Alerta[]>([]);
   
   // UI views & Modals
-  const [activeTab, setActiveTab] = useState<'list' | 'timeline' | 'users' | 'email'>('list');
+  const [activeTab, setActiveTab] = useState<'list' | 'timeline' | 'users' | 'email' | 'catalogos' | 'audit'>('list');
   const [selectedConvenioId, setSelectedConvenioId] = useState<number | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingConvenio, setEditingConvenio] = useState<Convenio | undefined>(undefined);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showResetDbModal, setShowResetDbModal] = useState(false);
+  const [showExpiredToast, setShowExpiredToast] = useState(true);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -73,6 +80,10 @@ export default function App() {
       const dataAlerts = await resAlerts.json();
       if (resAlerts.ok) {
         setAlerts(dataAlerts);
+        const expired = dataAlerts.filter((a: Alerta) => a.tipo === 'vencido' || a.severidad === 'danger' || (a.diasRestantes !== null && a.diasRestantes < 0));
+        if (expired.length > 0) {
+          setShowExpiredToast(true);
+        }
       }
     } catch (err) {
       console.error("Error fetching data:", err);
@@ -264,6 +275,18 @@ export default function App() {
     );
   };
 
+  const handleExportPDF = () => {
+    generateConveniosPDF({
+      convenios: filteredConvenios,
+      filters: {
+        searchQuery,
+        filterStatus,
+        filterPlan,
+        filterFacultad,
+      }
+    });
+  };
+
   if (!token) {
     return <Login onLoginSuccess={handleLoginSuccess} />;
   }
@@ -339,6 +362,16 @@ export default function App() {
             </button>
 
             <button
+              onClick={handleExportPDF}
+              disabled={filteredConvenios.length === 0}
+              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white active:scale-[0.98] rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5"
+              title="Descargar reporte en formato PDF de los convenios filtrados"
+            >
+              <FileDown className="w-4 h-4 text-indigo-400" />
+              Generar Informe PDF
+            </button>
+
+            <button
               onClick={() => {
                 setEditingConvenio(undefined);
                 setShowCreateModal(true);
@@ -358,7 +391,7 @@ export default function App() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* Column 1: Active Alert Notifications Box */}
-          <div className="lg:col-span-1 space-y-4">
+          <div id="alert-panel" className="lg:col-span-1 space-y-4">
             <AlertPanel 
               alerts={alerts} 
               onDismiss={handleDismissAlert} 
@@ -395,53 +428,124 @@ export default function App() {
           {/* Column 2 & 3: Filterable Tables & Timelines */}
           <div className="lg:col-span-2 space-y-6">
             
-            {/* Nav tabs for Main Workspace */}
-            <div className="bg-white p-1 rounded-xl border border-slate-200/80 shadow-2xs flex max-w-2xl flex-wrap sm:flex-nowrap gap-1">
-              <button
-                onClick={() => setActiveTab('list')}
-                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 min-w-[120px] ${
-                  activeTab === 'list'
-                    ? 'bg-indigo-600 text-white shadow-2xs'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
-                }`}
-              >
-                <ListTodo className="w-3.5 h-3.5" />
-                Tablero de Convenios
-              </button>
-              <button
-                onClick={() => setActiveTab('timeline')}
-                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 min-w-[120px] ${
-                  activeTab === 'timeline'
-                    ? 'bg-indigo-600 text-white shadow-2xs'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
-                }`}
-              >
-                <Calendar className="w-3.5 h-3.5" />
-                Cronograma Temporal
-              </button>
-              <button
-                onClick={() => setActiveTab('email')}
-                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 min-w-[120px] ${
-                  activeTab === 'email'
-                    ? 'bg-indigo-600 text-white shadow-2xs'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
-                }`}
-              >
-                <Mail className="w-3.5 h-3.5" />
-                Configurar Correo
-              </button>
-              {user?.role === 'admin' && (
+            {/* Nav tabs for Main Workspace & Admin Actions */}
+            <div className="bg-white p-1.5 rounded-2xl border border-slate-200/90 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-2.5">
+              {/* Tab navigation pills with smooth horizontal scroll */}
+              <div className="flex items-center gap-1 overflow-x-auto scroll-smooth py-0.5 max-w-full flex-nowrap [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
                 <button
-                  onClick={() => setActiveTab('users')}
-                  className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 min-w-[120px] ${
-                    activeTab === 'users'
-                      ? 'bg-indigo-600 text-white shadow-2xs'
-                      : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
+                  onClick={() => setActiveTab('list')}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                    activeTab === 'list'
+                      ? 'bg-gradient-to-r from-indigo-600 to-violet-700 text-white shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
                   }`}
                 >
-                  <Users className="w-3.5 h-3.5" />
-                  Gestión de Usuarios
+                  <ListTodo className="w-3.5 h-3.5 shrink-0" />
+                  <span className="relative">
+                    Tablero de Convenios
+                    {activeTab === 'list' && (
+                      <span className="absolute -bottom-1 left-0 right-0 h-[2px] bg-white rounded-full shadow-2xs animate-in fade-in zoom-in-75 duration-150" />
+                    )}
+                  </span>
                 </button>
+                <button
+                  onClick={() => setActiveTab('timeline')}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                    activeTab === 'timeline'
+                      ? 'bg-gradient-to-r from-indigo-600 to-violet-700 text-white shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <Calendar className="w-3.5 h-3.5 shrink-0" />
+                  <span className="relative">
+                    Cronograma
+                    {activeTab === 'timeline' && (
+                      <span className="absolute -bottom-1 left-0 right-0 h-[2px] bg-white rounded-full shadow-2xs animate-in fade-in zoom-in-75 duration-150" />
+                    )}
+                  </span>
+                </button>
+                {user?.role === 'admin' && (
+                  <>
+                    <button
+                      onClick={() => setActiveTab('email')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeTab === 'email'
+                          ? 'bg-gradient-to-r from-indigo-600 to-violet-700 text-white shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
+                      }`}
+                    >
+                      <Mail className="w-3.5 h-3.5 shrink-0" />
+                      <span className="relative">
+                        Configurar Correo
+                        {activeTab === 'email' && (
+                          <span className="absolute -bottom-1 left-0 right-0 h-[2px] bg-white rounded-full shadow-2xs animate-in fade-in zoom-in-75 duration-150" />
+                        )}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('catalogos')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeTab === 'catalogos'
+                          ? 'bg-gradient-to-r from-indigo-600 to-violet-700 text-white shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
+                      }`}
+                    >
+                      <Database className="w-3.5 h-3.5 shrink-0" />
+                      <span className="relative">
+                        Catálogos BD
+                        {activeTab === 'catalogos' && (
+                          <span className="absolute -bottom-1 left-0 right-0 h-[2px] bg-white rounded-full shadow-2xs animate-in fade-in zoom-in-75 duration-150" />
+                        )}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('users')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeTab === 'users'
+                          ? 'bg-gradient-to-r from-indigo-600 to-violet-700 text-white shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
+                      }`}
+                    >
+                      <Users className="w-3.5 h-3.5 shrink-0" />
+                      <span className="relative">
+                        Gestión Usuarios
+                        {activeTab === 'users' && (
+                          <span className="absolute -bottom-1 left-0 right-0 h-[2px] bg-white rounded-full shadow-2xs animate-in fade-in zoom-in-75 duration-150" />
+                        )}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('audit')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeTab === 'audit'
+                          ? 'bg-gradient-to-r from-indigo-600 to-violet-700 text-white shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
+                      }`}
+                    >
+                      <History className="w-3.5 h-3.5 shrink-0" />
+                      <span className="relative">
+                        Auditoría
+                        {activeTab === 'audit' && (
+                          <span className="absolute -bottom-1 left-0 right-0 h-[2px] bg-white rounded-full shadow-2xs animate-in fade-in zoom-in-75 duration-150" />
+                        )}
+                      </span>
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {/* Reset DB Destructive Action Button (Admin Only) */}
+              {user?.role === 'admin' && (
+                <div className="flex items-center pt-1.5 md:pt-0 border-t md:border-t-0 border-slate-100 shrink-0">
+                  <button
+                    onClick={() => setShowResetDbModal(true)}
+                    className="w-full md:w-auto px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-1.5 text-rose-700 bg-rose-50 hover:bg-rose-100/80 border border-rose-200/90 shadow-2xs active:scale-95 cursor-pointer whitespace-nowrap shrink-0"
+                    title="Inicializar la base de datos en blanco (Solo Administrador)"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                    <span>Inicializar BD</span>
+                  </button>
+                </div>
               )}
             </div>
 
@@ -479,6 +583,16 @@ export default function App() {
                         <option value="expired">Vencidos</option>
                         <option value="suspended">Suspendidos</option>
                       </select>
+
+                      <button
+                        onClick={handleExportPDF}
+                        disabled={filteredConvenios.length === 0}
+                        className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shrink-0"
+                        title="Exportar PDF de convenios visibles"
+                      >
+                        <FileDown className="w-4 h-4 text-indigo-600" />
+                        <span className="hidden sm:inline">Exportar PDF</span>
+                      </button>
                     </div>
                   </div>
 
@@ -676,6 +790,14 @@ export default function App() {
               />
             )}
 
+            {/* GESTIÓN DE CATÁLOGOS (PLANES Y FACULTADES) VIEW (Admin Only) */}
+            {activeTab === 'catalogos' && user?.role === 'admin' && token && (
+              <CatalogManagement 
+                token={token} 
+                currentUser={user} 
+              />
+            )}
+
             {/* GESTIÓN DE USUARIOS VIEW (Admin Only) */}
             {activeTab === 'users' && user?.role === 'admin' && (
               <UserManagement 
@@ -684,9 +806,14 @@ export default function App() {
               />
             )}
 
-            {/* CONFIGURACIÓN DE CORREO VIEW */}
-            {activeTab === 'email' && token && (
+            {/* CONFIGURACIÓN DE CORREO VIEW (Admin Only) */}
+            {activeTab === 'email' && user?.role === 'admin' && token && (
               <EmailConfig token={token} />
+            )}
+
+            {/* AUDITORÍA DE CAMBIOS EN BASE DE DATOS VIEW (Admin Only) */}
+            {activeTab === 'audit' && user?.role === 'admin' && token && (
+              <AuditLogs token={token} />
             )}
 
           </div>
@@ -726,13 +853,38 @@ export default function App() {
       )}
 
       {/* Bulk Import Modal */}
-      {showImportModal && (
+      {showImportModal && token && (
         <ImportModal
           onClose={() => setShowImportModal(false)}
           onImportSuccess={() => {
             fetchData();
           }}
           token={token}
+        />
+      )}
+
+      {/* Reset Database Modal (Admin Only) */}
+      {showResetDbModal && token && (
+        <ResetDatabaseModal
+          token={token}
+          onClose={() => setShowResetDbModal(false)}
+          onSuccess={() => {
+            fetchData();
+          }}
+        />
+      )}
+
+      {/* Expired Agreements Toast Notification (Top-Right) */}
+      {showExpiredToast && token && (
+        <ExpiredToast
+          expiredAlerts={alerts.filter(a => a.tipo === 'vencido' || a.severidad === 'danger' || (a.diasRestantes !== null && a.diasRestantes < 0))}
+          onClose={() => setShowExpiredToast(false)}
+          onViewAlerts={() => {
+            setActiveTab('list');
+            const el = document.getElementById('alert-panel');
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+          }}
+          onSelectConvenio={(id) => setSelectedConvenioId(id)}
         />
       )}
 
