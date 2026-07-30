@@ -1322,10 +1322,13 @@ async function startServer() {
 
       const db = await getDb();
 
-      // Clear all convenios and dismissed alerts
+      // Clear all convenios, catalog tables (planes, facultades, tipologías) and dismissed alerts
       await db.run("DELETE FROM convenios");
       await db.run("DELETE FROM dismissed_alerts");
       await db.run("DELETE FROM audit_logs");
+      await db.run("DELETE FROM planes_servicio");
+      await db.run("DELETE FROM facultades");
+      await db.run("DELETE FROM tipologias");
 
       // Log audit action as the first entry in fresh audit log
       await logAudit(
@@ -1668,6 +1671,76 @@ async function startServer() {
     } catch (err: any) {
       console.error(err);
       return res.status(500).json({ error: "Error al eliminar tipología: " + err.message });
+    }
+  });
+
+  // POST /api/catalogs/import (Bulk import items into planes_servicio, facultades, or tipologias)
+  app.post("/api/catalogs/import", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador" });
+      }
+
+      const { targetTable, items } = req.body;
+      if (!targetTable || !['planes_servicio', 'facultades', 'tipologias'].includes(targetTable)) {
+        return res.status(400).json({ error: "Tabla de catálogo inválida" });
+      }
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "Debe proporcionar una lista no vacía de elementos" });
+      }
+
+      const db = await getDb();
+      let importedCount = 0;
+      let skippedCount = 0;
+
+      for (const rawName of items) {
+        if (typeof rawName !== 'string') continue;
+        const trimmed = rawName.trim();
+        if (!trimmed) continue;
+
+        const existing = await db.get(
+          `SELECT id FROM ${targetTable} WHERE LOWER(nombre) = LOWER(?)`,
+          [trimmed]
+        );
+
+        if (existing) {
+          skippedCount++;
+        } else {
+          await db.run(`INSERT INTO ${targetTable} (nombre) VALUES (?)`, [trimmed]);
+          importedCount++;
+        }
+      }
+
+      const catalogNameMap: Record<string, string> = {
+        planes_servicio: "Planes de Servicio",
+        facultades: "Facultades Responsables",
+        tipologias: "Tipologías de Convenio"
+      };
+
+      await logAudit(
+        db,
+        user,
+        "IMPORTAR_CATALOGO_EXCEL",
+        "catalogs",
+        targetTable,
+        `Se importaron ${importedCount} registros en ${catalogNameMap[targetTable] || targetTable} desde Excel (${skippedCount} duplicados omitidos)`
+      );
+
+      return res.json({
+        success: true,
+        importedCount,
+        skippedCount,
+        total: items.length,
+        message: `Se importaron ${importedCount} elementos exitosamente en ${catalogNameMap[targetTable] || targetTable}.${skippedCount > 0 ? ` (${skippedCount} ya existían y fueron omitidos)` : ''}`
+      });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al importar catálogo desde Excel: " + err.message });
     }
   });
 

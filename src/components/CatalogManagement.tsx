@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { Database, Plus, Trash2, Edit2, Check, X, Shield, RefreshCw, AlertCircle, CheckCircle2, Layers, Building2, Tag } from 'lucide-react';
-import { motion } from 'motion/react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Database, Plus, Trash2, Edit2, Check, X, Shield, RefreshCw, AlertCircle, CheckCircle2, Layers, Building2, Tag, FileSpreadsheet, Upload, Download, FileText, Sparkles } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import * as XLSX from 'xlsx';
 import { User } from '../types';
 
 interface CatalogItem {
@@ -39,6 +40,172 @@ export default function CatalogManagement({ token, currentUser }: CatalogManagem
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  // Excel Import State
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importWorkbook, setImportWorkbook] = useState<XLSX.WorkBook | null>(null);
+  const [importFileName, setImportFileName] = useState<string>('');
+  const [selectedSheet, setSelectedSheet] = useState<string>('');
+  const [importTargetCatalog, setImportTargetCatalog] = useState<'planes_servicio' | 'facultades' | 'tipologias'>('planes_servicio');
+  const [parsedImportItems, setParsedImportItems] = useState<string[]>([]);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Download Example Excel Template
+  const handleDownloadTemplate = () => {
+    const wb = XLSX.utils.book_new();
+
+    const wsPlanes = XLSX.utils.aoa_to_sheet([
+      ['Nombre'],
+      ['Convocatoria Colciencias 2026'],
+      ['Plan de Desarrollo Regional'],
+      ['Programa Marco de Innovación']
+    ]);
+    XLSX.utils.book_append_sheet(wb, wsPlanes, 'Planes de Servicio');
+
+    const wsFacultades = XLSX.utils.aoa_to_sheet([
+      ['Nombre'],
+      ['Facultad de Medicina y Ciencias de la Salud'],
+      ['Facultad de Arquitectura y Diseño'],
+      ['Facultad de Educación y Humanidades']
+    ]);
+    XLSX.utils.book_append_sheet(wb, wsFacultades, 'Facultades Responsables');
+
+    const wsTipologias = XLSX.utils.aoa_to_sheet([
+      ['Nombre'],
+      ['Convenio Específico de Prácticas'],
+      ['Convenio Marco de Cooperación'],
+      ['Convenio de Movilidad Académica']
+    ]);
+    XLSX.utils.book_append_sheet(wb, wsTipologias, 'Tipologias');
+
+    XLSX.writeFile(wb, 'Plantilla_Catalogos_Convenios.xlsx');
+  };
+
+  // Extract non-empty text strings from sheet
+  const extractItemsFromSheet = (wb: XLSX.WorkBook, sheetName: string) => {
+    const worksheet = wb.Sheets[sheetName];
+    if (!worksheet) {
+      setParsedImportItems([]);
+      return;
+    }
+
+    const rawRows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+    const extractedSet = new Set<string>();
+
+    for (let i = 0; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      if (!Array.isArray(row)) continue;
+
+      for (let col = 0; col < row.length; col++) {
+        const val = String(row[col] ?? '').trim();
+        if (!val) continue;
+
+        // Skip header words on the first row
+        if (i === 0 && ['nombre', 'name', 'item', 'plan', 'facultad', 'tipologia', 'catálogo', 'catalogo'].includes(val.toLowerCase())) {
+          continue;
+        }
+
+        if (val.length >= 2) {
+          extractedSet.add(val);
+        }
+      }
+    }
+
+    setParsedImportItems(Array.from(extractedSet));
+  };
+
+  // Handle Excel file selection
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setError('');
+    setSuccess('');
+
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: 'array' });
+      setImportWorkbook(workbook);
+      setImportFileName(file.name);
+
+      const tabToCatalog: Record<string, 'planes_servicio' | 'facultades' | 'tipologias'> = {
+        planes: 'planes_servicio',
+        facultades: 'facultades',
+        tipologias: 'tipologias'
+      };
+      const initialCatalog = tabToCatalog[activeTab] || 'planes_servicio';
+      setImportTargetCatalog(initialCatalog);
+
+      const firstSheet = workbook.SheetNames[0] || '';
+      setSelectedSheet(firstSheet);
+      extractItemsFromSheet(workbook, firstSheet);
+      setShowImportModal(true);
+    } catch (err: any) {
+      setError('Error al leer el archivo Excel: ' + (err.message || 'Formato no soportado'));
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleSheetChange = (sheetName: string) => {
+    setSelectedSheet(sheetName);
+    if (importWorkbook) {
+      extractItemsFromSheet(importWorkbook, sheetName);
+    }
+  };
+
+  // Helper to check if item already exists in DB
+  const isItemExisting = (item: string) => {
+    const clean = item.trim().toLowerCase();
+    if (importTargetCatalog === 'planes_servicio') {
+      return planes.some(p => p.nombre.trim().toLowerCase() === clean);
+    }
+    if (importTargetCatalog === 'facultades') {
+      return facultades.some(f => f.nombre.trim().toLowerCase() === clean);
+    }
+    if (importTargetCatalog === 'tipologias') {
+      return tipologias.some(t => t.nombre.trim().toLowerCase() === clean);
+    }
+    return false;
+  };
+
+  // Execute Excel Import batch API call
+  const executeImport = async () => {
+    if (parsedImportItems.length === 0) return;
+    setImporting(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      const res = await fetch('/api/catalogs/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          targetTable: importTargetCatalog,
+          items: parsedImportItems
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Error al importar catálogo desde Excel');
+      }
+
+      setSuccess(data.message);
+      setShowImportModal(false);
+      fetchCatalogs();
+    } catch (err: any) {
+      setError(err.message || 'Error al procesar la importación');
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const fetchCatalogs = async () => {
     setLoading(true);
@@ -362,8 +529,17 @@ export default function CatalogManagement({ token, currentUser }: CatalogManagem
 
   return (
     <div className="bg-white rounded-xl border border-slate-200/80 shadow-xs overflow-hidden" id="catalogs-management-module">
+      {/* Hidden File Input for Excel Import */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        accept=".xlsx, .xls, .csv"
+        onChange={handleFileSelect}
+        className="hidden"
+      />
+
       {/* Header */}
-      <div className="p-6 border-b border-slate-100 bg-slate-50/40 flex justify-between items-center">
+      <div className="p-6 border-b border-slate-100 bg-slate-50/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h3 className="text-base font-bold text-slate-950 flex items-center gap-2">
             <Database className="w-5 h-5 text-indigo-600" />
@@ -373,14 +549,37 @@ export default function CatalogManagement({ token, currentUser }: CatalogManagem
             Administra los ítems fijos para los campos desplegables de <strong>Plan de Servicio</strong>, <strong>Facultad Responsable</strong> y <strong>Tipología</strong> en los convenios.
           </p>
         </div>
-        <button
-          onClick={fetchCatalogs}
-          disabled={loading}
-          className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-all"
-          title="Actualizar tablas"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-        </button>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleDownloadTemplate}
+            className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer"
+            title="Descargar plantilla Excel (.xlsx) con pestañas para Planes, Facultades y Tipologías"
+          >
+            <Download className="w-3.5 h-3.5 text-slate-500" />
+            <span>Plantilla Excel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer"
+            title="Cargar archivo Excel (.xlsx, .xls, .csv) para importar datos masivos en catálogos"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>Importar desde Excel</span>
+          </button>
+
+          <button
+            onClick={fetchCatalogs}
+            disabled={loading}
+            className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-xl transition-all border border-transparent hover:border-slate-200"
+            title="Actualizar tablas"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </div>
 
       {/* Internal Tabs */}
@@ -840,6 +1039,189 @@ export default function CatalogManagement({ token, currentUser }: CatalogManagem
           </div>
         )}
       </div>
+
+      {/* EXCEL IMPORT MODAL */}
+      <AnimatePresence>
+        {showImportModal && (
+          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-2xl w-full overflow-hidden"
+            >
+              {/* Modal Header */}
+              <div className="p-5 border-b border-slate-100 bg-gradient-to-r from-emerald-50 via-teal-50 to-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-xs">
+                    <FileSpreadsheet className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">
+                      Importar Catálogo desde Excel
+                    </h3>
+                    <p className="text-xs text-slate-500 font-medium">
+                      Archivo seleccionado: <span className="text-emerald-700 font-mono font-bold">{importFileName}</span>
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowImportModal(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="p-6 space-y-5">
+                {/* Options grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Select Sheet */}
+                  {importWorkbook && importWorkbook.SheetNames.length > 1 && (
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                        Hoja de Excel a Leer
+                      </label>
+                      <select
+                        value={selectedSheet}
+                        onChange={(e) => handleSheetChange(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 bg-white focus:outline-none focus:border-emerald-500"
+                      >
+                        {importWorkbook.SheetNames.map((sheet) => (
+                          <option key={sheet} value={sheet}>
+                            Hoja: {sheet}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Select Target Catalog */}
+                  <div className={importWorkbook && importWorkbook.SheetNames.length > 1 ? '' : 'sm:col-span-2'}>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                      Catálogo Destino en Base de Datos
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setImportTargetCatalog('planes_servicio')}
+                        className={`p-2.5 rounded-xl border text-xs font-bold flex flex-col items-center justify-center gap-1 transition-all cursor-pointer ${
+                          importTargetCatalog === 'planes_servicio'
+                            ? 'bg-indigo-50 border-indigo-500 text-indigo-700 shadow-2xs'
+                            : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        <Layers className="w-4 h-4" />
+                        <span>Planes</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setImportTargetCatalog('facultades')}
+                        className={`p-2.5 rounded-xl border text-xs font-bold flex flex-col items-center justify-center gap-1 transition-all cursor-pointer ${
+                          importTargetCatalog === 'facultades'
+                            ? 'bg-indigo-50 border-indigo-500 text-indigo-700 shadow-2xs'
+                            : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        <Building2 className="w-4 h-4" />
+                        <span>Facultades</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setImportTargetCatalog('tipologias')}
+                        className={`p-2.5 rounded-xl border text-xs font-bold flex flex-col items-center justify-center gap-1 transition-all cursor-pointer ${
+                          importTargetCatalog === 'tipologias'
+                            ? 'bg-indigo-50 border-indigo-500 text-indigo-700 shadow-2xs'
+                            : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        <Tag className="w-4 h-4" />
+                        <span>Tipologías</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Items Preview Box */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Vista Previa de Registros ({parsedImportItems.length} detectados)
+                    </span>
+                    <div className="flex items-center gap-3 text-[11px] font-semibold">
+                      <span className="flex items-center gap-1 text-emerald-700">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                        {parsedImportItems.filter(i => !isItemExisting(i)).length} Nuevos
+                      </span>
+                      <span className="flex items-center gap-1 text-slate-500">
+                        <span className="w-2 h-2 rounded-full bg-slate-300"></span>
+                        {parsedImportItems.filter(i => isItemExisting(i)).length} Ya existen
+                      </span>
+                    </div>
+                  </div>
+
+                  {parsedImportItems.length === 0 ? (
+                    <div className="p-6 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center text-xs text-slate-400">
+                      No se encontraron textos legibles en esta hoja del Excel.
+                    </div>
+                  ) : (
+                    <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-xl bg-slate-50/50 p-2 space-y-1.5 divide-y divide-slate-100">
+                      {parsedImportItems.map((item, idx) => {
+                        const exists = isItemExisting(item);
+                        return (
+                          <div key={idx} className="flex items-center justify-between pt-1.5 px-2">
+                            <span className="text-xs font-medium text-slate-800 truncate pr-2">
+                              {item}
+                            </span>
+                            {exists ? (
+                              <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-[10px] font-bold rounded-md shrink-0">
+                                Ya existe en BD
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-extrabold rounded-md shrink-0 flex items-center gap-1">
+                                <Sparkles className="w-3 h-3 text-emerald-600" />
+                                Nuevo registro
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowImportModal(false)}
+                  className="px-4 py-2 border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  type="button"
+                  onClick={executeImport}
+                  disabled={importing || parsedImportItems.length === 0}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-extrabold rounded-xl shadow-2xs transition-all disabled:bg-emerald-300 cursor-pointer flex items-center gap-2"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>
+                    {importing
+                      ? 'Importando...'
+                      : `Importar ${parsedImportItems.filter(i => !isItemExisting(i)).length} Registros Nuevos`}
+                  </span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

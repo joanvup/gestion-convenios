@@ -86,7 +86,7 @@ export default function ResetDatabaseModal({ onClose, onSuccess, token }: ResetD
               <span>¡ADVERTENCIA DE ACCIÓN DESTRUCTIVA!</span>
             </div>
             <p className="text-[11px] text-rose-900 leading-relaxed font-medium">
-              Esta operación eliminará <strong>TODOS</strong> los convenios registrados, alertas descartadas e historial previo de auditoría en la base de datos.
+              Esta operación eliminará <strong>TODOS</strong> los convenios registrados, catálogos (Planes de Servicio, Facultades Responsables, Tipologías), alertas descartadas e historial previo de auditoría en la base de datos.
             </p>
             <p className="text-[10px] text-rose-700 font-bold uppercase tracking-wide pt-1">
               • Esta acción es irreversible y no se puede deshacer.
