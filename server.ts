@@ -341,8 +341,8 @@ async function startServer() {
         [user.email, code, expiresAt]
       );
 
-      // Trigger email sending in background or fast check
-      const emailPromise = sendEmail({
+      // Send verification code strictly via email
+      const emailSent = await sendEmail({
         to: user.email,
         subject: "Código de recuperación de contraseña - Gestor de Convenios",
         html: `
@@ -360,19 +360,17 @@ async function startServer() {
         `
       });
 
-      // Wait up to 1.5s for fast SMTP delivery, or proceed with code on screen
-      const quickTimeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1500));
-      const emailSent = await Promise.race([emailPromise, quickTimeout]);
+      await logAudit(db, user, "SOLICITUD_RECUPERACION", "user", user.id, `Código de recuperación enviado a ${user.email}`);
 
-      await logAudit(db, user, "SOLICITUD_RECUPERACION", "user", user.id, `Código de recuperación generado para ${user.email}`);
+      if (!emailSent) {
+        return res.status(400).json({
+          error: "No se pudo enviar el correo con el código de verificación. Verifica que el servidor de correo SMTP esté configurado y activo en el sistema."
+        });
+      }
 
       return res.json({
         success: true,
-        message: emailSent 
-          ? `Se ha enviado un código de verificación de 6 dígitos a ${user.email}.`
-          : `Se ha generado el código de verificación para ${user.email}.`,
-        emailSent,
-        code
+        message: `Se ha enviado un código de verificación de 6 dígitos a ${user.email}. Por favor revisa tu correo electrónico.`
       });
     } catch (err: any) {
       console.error("Error en forgot-password:", err);

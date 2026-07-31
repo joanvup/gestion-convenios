@@ -29,7 +29,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [code, setCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [generatedCode, setGeneratedCode] = useState<string | null>(null);
 
   // Common UI state
   const [error, setError] = useState('');
@@ -80,11 +79,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         throw new Error(data.error || 'No se pudo enviar el código');
       }
 
-      if (data.code) {
-        setGeneratedCode(data.code);
-      }
-
-      setSuccess(data.message || 'Código de verificación generado correctamente.');
+      setSuccess(data.message || 'Se ha enviado un código de verificación de 6 dígitos a tu correo electrónico.');
       setMode('reset');
     } catch (err: any) {
       setError(err.message || 'Error al solicitar el código de recuperación');
@@ -135,7 +130,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
       setCode('');
       setNewPassword('');
       setConfirmPassword('');
-      setGeneratedCode(null);
     } catch (err: any) {
       setError(err.message || 'Error al restablecer la contraseña');
     } finally {
@@ -321,20 +315,15 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         {/* MODE 3: RESET PASSWORD FORM WITH VERIFICATION CODE */}
         {mode === 'reset' && (
           <form className="mt-4 space-y-4" onSubmit={handleResetSubmit}>
-            {generatedCode && (
-              <div className="p-3 bg-amber-50 border border-amber-200/80 rounded-xl text-xs text-amber-900 font-medium">
-                <div className="flex items-center gap-1.5 font-bold text-amber-800 mb-0.5">
-                  <Info className="w-4 h-4 shrink-0 text-amber-600" />
-                  <span>Código de Verificación Generado:</span>
-                </div>
-                <div className="my-1.5 p-2 bg-white rounded-lg border border-amber-300 text-center font-mono text-lg font-black tracking-widest text-slate-900 shadow-2xs">
-                  {generatedCode}
-                </div>
-                <p className="text-[11px] text-amber-700">
-                  Ingresa este código a continuación junto con tu nueva contraseña.
-                </p>
+            <div className="p-3.5 bg-indigo-50/80 border border-indigo-100 rounded-xl text-xs text-indigo-950 font-medium">
+              <div className="flex items-center gap-1.5 font-bold text-indigo-900 mb-1">
+                <Info className="w-4 h-4 shrink-0 text-indigo-600" />
+                <span>Revisa tu correo electrónico</span>
               </div>
-            )}
+              <p className="text-[12px] text-indigo-800 leading-relaxed">
+                Hemos enviado un código de verificación de 6 dígitos a <strong className="font-semibold text-indigo-950">{resetEmail || 'tu correo'}</strong>. Copia el código recibido en tu bandeja de entrada e ingrésalo a continuación.
+              </p>
+            </div>
 
             <div>
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
