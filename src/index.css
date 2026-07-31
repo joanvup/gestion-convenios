@@ -6,8 +6,118 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
+:root {
+  --bg-main: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-nav: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --bg-hover: #f1f5f9;
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  --border-color: #e2e8f0;
+  --bg-input: #ffffff;
+}
+
+.dark {
+  --bg-main: #0b0f19;
+  --bg-card: #151d2a;
+  --bg-nav: #151d2a;
+  --bg-subtle: #1e293b;
+  --bg-hover: #1e293b;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --border-color: #2a3749;
+  --bg-input: #1b2434;
+  color-scheme: dark;
+}
+
 body {
   font-family: var(--font-sans);
-  background-color: #f8fafc;
-  color: #0f172a;
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
+
+/* Dark mode overrides using CSS variables and theme rules */
+.dark body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+}
+
+.dark nav#app-nav {
+  background-color: var(--bg-nav) !important;
+  border-color: var(--border-color) !important;
+}
+
+.dark .bg-white {
+  background-color: var(--bg-card) !important;
+  color: var(--text-main);
+}
+
+.dark .bg-slate-50,
+.dark .bg-slate-50\/70 {
+  background-color: var(--bg-main) !important;
+}
+
+.dark .bg-slate-100,
+.dark .bg-slate-100\/70 {
+  background-color: var(--bg-subtle) !important;
+}
+
+.dark .border-slate-200,
+.dark .border-slate-200\/80,
+.dark .border-slate-200\/90,
+.dark .border-slate-300 {
+  border-color: var(--border-color) !important;
+}
+
+.dark .text-slate-900,
+.dark .text-slate-800,
+.dark .text-slate-700 {
+  color: var(--text-main) !important;
+}
+
+.dark .text-slate-600,
+.dark .text-slate-500,
+.dark .text-slate-400 {
+  color: var(--text-muted) !important;
+}
+
+.dark .hover\:bg-slate-50:hover,
+.dark .hover\:bg-slate-100:hover,
+.dark .hover\:bg-slate-100\/70:hover {
+  background-color: var(--bg-hover) !important;
+}
+
+.dark input,
+.dark select,
+.dark textarea {
+  background-color: var(--bg-input) !important;
+  color: var(--text-main) !important;
+  border-color: var(--border-color) !important;
+}
+
+.dark .bg-indigo-50,
+.dark .bg-indigo-50\/70 {
+  background-color: rgba(99, 102, 241, 0.15) !important;
+  border-color: rgba(99, 102, 241, 0.35) !important;
+}
+
+.dark .bg-amber-50,
+.dark .bg-amber-50\/70 {
+  background-color: rgba(245, 158, 11, 0.15) !important;
+  border-color: rgba(245, 158, 11, 0.35) !important;
+}
+
+.dark .bg-emerald-50,
+.dark .bg-emerald-50\/70 {
+  background-color: rgba(16, 185, 129, 0.15) !important;
+  border-color: rgba(16, 185, 129, 0.35) !important;
+}
+
+.dark .bg-red-50,
+.dark .bg-red-50\/70 {
+  background-color: rgba(239, 68, 68, 0.15) !important;
+  border-color: rgba(239, 68, 68, 0.35) !important;
+}
+

@@ -1,7 +1,8 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
-import { getDb } from "./server/db.js";
+import { getDb, closeDb } from "./server/db.js";
 import nodemailer from "nodemailer";
 
 async function startServer() {
@@ -9,7 +10,8 @@ async function startServer() {
   const PORT = 3000;
 
   // Middleware
-  app.use(express.json());
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   // Simple Session Authorization Helper
   const getUserFromRequest = async (req: express.Request) => {
@@ -94,7 +96,9 @@ async function startServer() {
             tipo: "vence_pronto",
             severidad: "warning_high", // Amber/Orange alert
             fechaReferencia: effectiveEndDateStr,
-            mensaje: `El convenio vencerá pronto, quedan ${diffDays} días (fecha límite: ${effectiveEndDateStr}).`,
+            mensaje: diffDays === 0
+              ? `El convenio vence hoy (fecha límite: ${effectiveEndDateStr}).`
+              : `El convenio vencerá pronto, quedan ${diffDays} días (fecha límite: ${effectiveEndDateStr}).`,
             diasRestantes: diffDays
           });
         }
@@ -136,6 +140,8 @@ async function startServer() {
             fechaReferencia: c.primer_informe,
             mensaje: diffDays < 0 
               ? `El plazo para el Primer Informe venció hace ${Math.abs(diffDays)} días (fecha límite: ${c.primer_informe}).`
+              : diffDays === 0
+              ? `Hoy es la fecha límite para la entrega del Primer Informe (fecha límite: ${c.primer_informe}).`
               : `Faltan ${diffDays} días para la entrega del Primer Informe (fecha límite: ${c.primer_informe}).`,
             diasRestantes: diffDays
           });
@@ -475,7 +481,7 @@ async function startServer() {
       }
 
       const db = await getDb();
-      const settings = await db.get("SELECT host, port, secure, user, sender_name, enabled FROM email_settings LIMIT 1");
+      const settings = await db.get("SELECT host, port, secure, user, sender_name, enabled, scheduled_time, scheduled_days FROM email_settings LIMIT 1");
       
       return res.json(settings || {
         host: "smtp.gmail.com",
@@ -483,7 +489,9 @@ async function startServer() {
         secure: 0,
         user: "",
         sender_name: "Gestor de Convenios",
-        enabled: 0
+        enabled: 0,
+        scheduled_time: "08:00",
+        scheduled_days: "1,2,3,4,5"
       });
     } catch (err: any) {
       console.error(err);
@@ -503,23 +511,25 @@ async function startServer() {
         return res.status(403).json({ error: "Acceso denegado. Se requieren permisos de administrador." });
       }
 
-      const { host, port, secure, user: emailUser, pass, sender_name, enabled } = req.body;
+      const { host, port, secure, user: emailUser, pass, sender_name, enabled, scheduled_time, scheduled_days } = req.body;
+      const formattedTime = scheduled_time && /^\d{2}:\d{2}$/.test(scheduled_time) ? scheduled_time : "08:00";
+      const formattedDays = typeof scheduled_days === 'string' && scheduled_days.trim() ? scheduled_days.trim() : "1,2,3,4,5";
       const db = await getDb();
 
       // Check if we need to update pass (only if a non-empty string is provided)
       if (pass && pass.trim()) {
         await db.run(
-          `UPDATE email_settings SET host = ?, port = ?, secure = ?, user = ?, pass = ?, sender_name = ?, enabled = ? WHERE id = (SELECT id FROM email_settings LIMIT 1)`,
-          [host, Number(port), Number(secure), emailUser, pass, sender_name, Number(enabled)]
+          `UPDATE email_settings SET host = ?, port = ?, secure = ?, user = ?, pass = ?, sender_name = ?, enabled = ?, scheduled_time = ?, scheduled_days = ? WHERE id = (SELECT id FROM email_settings LIMIT 1)`,
+          [host, Number(port), Number(secure), emailUser, pass, sender_name, Number(enabled), formattedTime, formattedDays]
         );
       } else {
         await db.run(
-          `UPDATE email_settings SET host = ?, port = ?, secure = ?, user = ?, sender_name = ?, enabled = ? WHERE id = (SELECT id FROM email_settings LIMIT 1)`,
-          [host, Number(port), Number(secure), emailUser, sender_name, Number(enabled)]
+          `UPDATE email_settings SET host = ?, port = ?, secure = ?, user = ?, sender_name = ?, enabled = ?, scheduled_time = ?, scheduled_days = ? WHERE id = (SELECT id FROM email_settings LIMIT 1)`,
+          [host, Number(port), Number(secure), emailUser, sender_name, Number(enabled), formattedTime, formattedDays]
         );
       }
 
-      const updated = await db.get("SELECT host, port, secure, user, sender_name, enabled FROM email_settings LIMIT 1");
+      const updated = await db.get("SELECT host, port, secure, user, sender_name, enabled, scheduled_time, scheduled_days FROM email_settings LIMIT 1");
       return res.json({ success: true, message: "Configuración de correo guardada correctamente", settings: updated });
     } catch (err: any) {
       console.error(err);
@@ -1350,6 +1360,107 @@ async function startServer() {
     }
   });
 
+  // GET /api/admin/backup-database (Admin only) - Download SQLite .db backup file
+  app.get("/api/admin/backup-database", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador para descargar el respaldo de la base de datos" });
+      }
+
+      const db = await getDb();
+      try {
+        await db.run("PRAGMA wal_checkpoint(FULL)");
+      } catch (e) {
+        // WAL mode checkpoint attempt
+      }
+
+      const dbPath = path.resolve(process.cwd(), "convenios.db");
+      if (!fs.existsSync(dbPath)) {
+        return res.status(404).json({ error: "Archivo de base de datos convenios.db no encontrado." });
+      }
+
+      await logAudit(
+        db,
+        user,
+        'BACKUP_BD',
+        'sistema',
+        'database',
+        `Descarga de respaldo de base de datos SQLite (.db) por el administrador ${user.name || user.email}`
+      );
+
+      const dateStr = new Date().toISOString().slice(0, 10);
+      res.setHeader("Content-Type", "application/x-sqlite3");
+      res.setHeader("Content-Disposition", `attachment; filename="backup_convenios_${dateStr}.db"`);
+      return res.sendFile(dbPath);
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al generar copia de respaldo: " + err.message });
+    }
+  });
+
+  // POST /api/admin/restore-database (Admin only) - Restore SQLite .db backup file
+  app.post("/api/admin/restore-database", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Requiere rol de administrador para restaurar la base de datos" });
+      }
+
+      const { fileData } = req.body;
+      if (!fileData || typeof fileData !== 'string') {
+        return res.status(400).json({ error: "No se proporcionaron datos de archivo válidos para restaurar." });
+      }
+
+      // Convert base64 string to buffer
+      const buffer = Buffer.from(fileData, 'base64');
+
+      // Check minimum file size and SQLite magic header "SQLite format 3\0"
+      if (buffer.length < 100) {
+        return res.status(400).json({ error: "El archivo subido es demasiado pequeño o no es un archivo .db válido." });
+      }
+
+      const headerStr = buffer.toString('utf8', 0, 15);
+      if (!headerStr.startsWith('SQLite format 3')) {
+        return res.status(400).json({ error: "El archivo proporcionado no tiene la firma de cabecera de una base de datos SQLite (.db) válida." });
+      }
+
+      // Safely close existing DB connection
+      await closeDb();
+
+      // Overwrite convenios.db with restored file
+      const dbPath = path.resolve(process.cwd(), "convenios.db");
+      fs.writeFileSync(dbPath, buffer);
+
+      // Re-initialize database instance and run migrations if needed
+      const db = await getDb();
+
+      // Log restore event in audit logs
+      await logAudit(
+        db,
+        user,
+        'RESTORE_BD',
+        'sistema',
+        'database',
+        `Restauración completa de base de datos SQLite (.db) por el administrador ${user.name || user.email}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Base de datos restaurada con éxito a partir del archivo de respaldo subido."
+      });
+    } catch (err: any) {
+      console.error("Error restoring database:", err);
+      return res.status(500).json({ error: "Error al restaurar la base de datos: " + err.message });
+    }
+  });
+
 
   // --- CATALOG API ENDPOINTS: PLANES DE SERVICIO ---
 
@@ -1745,15 +1856,101 @@ async function startServer() {
   });
 
 
+  // Helper function to calculate next scheduled execution date based on scheduled time and active days
+  const computeNextScheduledDate = (now: Date, timeStr: string, daysStr: string): Date => {
+    const parts = (timeStr || "08:00").split(":");
+    const targetHour = parseInt(parts[0] || "8", 10);
+    const targetMinute = parseInt(parts[1] || "0", 10);
+
+    const rawDays = (daysStr || "1,2,3,4,5")
+      .split(",")
+      .map(s => parseInt(s.trim(), 10))
+      .filter(n => !isNaN(n) && n >= 0 && n <= 6);
+    const allowedDays = rawDays.length > 0 ? rawDays : [1, 2, 3, 4, 5];
+
+    const candidate = new Date(now);
+    candidate.setHours(targetHour, targetMinute, 0, 0);
+
+    for (let i = 0; i < 14; i++) {
+      const candidateDay = candidate.getDay(); // 0 = Sun, 1 = Mon ... 6 = Sat
+      if (candidate.getTime() > now.getTime() && allowedDays.includes(candidateDay)) {
+        return candidate;
+      }
+      candidate.setDate(candidate.getDate() + 1);
+    }
+
+    return candidate;
+  };
+
+  // Variable tracking last automated daily alerts run
+  let lastDailyCheckAt: string | null = null;
+
+  // GET /api/system/time-status - Serves live server time and email notification scheduling status
+  app.get("/api/system/time-status", async (req, res) => {
+    try {
+      const db = await getDb();
+      const settings = await db.get("SELECT enabled, scheduled_time, scheduled_days, user FROM email_settings LIMIT 1");
+      
+      const now = new Date();
+      let scheduledTime = "08:00";
+      let scheduledDays = "1,2,3,4,5";
+      let enabled = false;
+      
+      if (settings) {
+        if (settings.scheduled_time) scheduledTime = settings.scheduled_time;
+        if (settings.scheduled_days) scheduledDays = settings.scheduled_days;
+        enabled = Boolean(settings.enabled);
+      }
+      
+      const nextRun = computeNextScheduledDate(now, scheduledTime, scheduledDays);
+
+      let lastCheckISO = lastDailyCheckAt;
+      if (!lastCheckISO) {
+        const lastCheckLog = await db.get(
+          "SELECT created_at FROM audit_logs WHERE action = 'ALERTA_DIARIA_AUTO' ORDER BY id DESC LIMIT 1"
+        );
+        if (lastCheckLog) {
+          lastCheckISO = lastCheckLog.created_at;
+        }
+      }
+
+      return res.json({
+        serverTimeISO: now.toISOString(),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        emailSchedule: {
+          enabled,
+          scheduledTime,
+          scheduledDays,
+          nextRunISO: nextRun.toISOString(),
+          lastCheckISO: lastCheckISO || null
+        }
+      });
+    } catch (err: any) {
+      console.error("Error in /api/system/time-status:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- AUTOMATIC ALERTS SCHEDULER (BACKGROUND THREAD) ---
 
   const runDailyAlertsCheck = async () => {
     try {
       console.log("[SCHEDULER] Iniciando chequeo diario automático de alertas de convenios...");
+      lastDailyCheckAt = new Date().toISOString();
       const db = await getDb();
-      const settings = await db.get("SELECT enabled, user FROM email_settings LIMIT 1");
+      const settings = await db.get("SELECT enabled, user, scheduled_time, scheduled_days FROM email_settings LIMIT 1");
       if (!settings || !settings.enabled) {
         console.log("[SCHEDULER] El envío automático está desactivado en la configuración de correo.");
+        return;
+      }
+
+      // Check if current day of week is allowed
+      const currentDay = new Date().getDay(); // 0 = Domingo, 1 = Lunes, etc.
+      const scheduledDaysStr = settings.scheduled_days || '1,2,3,4,5';
+      const allowedDays = scheduledDaysStr.split(',').map((s: string) => parseInt(s.trim(), 10)).filter((n: number) => !isNaN(n));
+
+      if (allowedDays.length > 0 && !allowedDays.includes(currentDay)) {
+        console.log(`[SCHEDULER] Omitiendo envío diario: el día de hoy (${currentDay}) no está dentro de los días de envío programados (${scheduledDaysStr}).`);
         return;
       }
 
@@ -1832,29 +2029,49 @@ async function startServer() {
         }
       }
       console.log(`[SCHEDULER] Chequeo diario finalizado. Correos enviados de manera automática: ${sentCount}`);
+
+      try {
+        await logAudit(
+          db,
+          { id: 0, email: 'sistema@local', name: 'Sistema Automático', role: 'admin' },
+          'ALERTA_DIARIA_AUTO',
+          'sistema',
+          'scheduler',
+          `Chequeo diario de alertas ejecutado a las ${settings.scheduled_time || '08:00'}. Correos enviados: ${sentCount}`
+        );
+      } catch (logErr) {
+        console.error("[SCHEDULER] Error guardando log de auditoría del scheduler:", logErr);
+      }
     } catch (error) {
       console.error("[SCHEDULER] Error en el chequeo de alertas diario automático:", error);
     }
   };
 
   const startEmailNotificationScheduler = () => {
-    // Run the scheduler every 24 hours
-    const getMsUntilNext8AM = () => {
-      const now = new Date();
-      const target = new Date();
-      target.setHours(8, 0, 0, 0); // Target is 8:00 AM
-      
-      if (now.getHours() >= 8) {
-        // If it is already past 8:00 AM, target tomorrow at 8:00 AM
-        target.setDate(target.getDate() + 1);
+    const getMsUntilNextScheduledTime = async () => {
+      let timeStr = "08:00";
+      let daysStr = "1,2,3,4,5";
+
+      try {
+        const db = await getDb();
+        const settings = await db.get("SELECT scheduled_time, scheduled_days FROM email_settings LIMIT 1");
+        if (settings) {
+          if (settings.scheduled_time) timeStr = settings.scheduled_time;
+          if (settings.scheduled_days) daysStr = settings.scheduled_days;
+        }
+      } catch (err) {
+        console.error("[SCHEDULER] Error al obtener hora y días programados:", err);
       }
-      return target.getTime() - now.getTime();
+
+      const now = new Date();
+      const nextRunDate = computeNextScheduledDate(now, timeStr, daysStr);
+
+      return { delay: nextRunDate.getTime() - now.getTime(), targetTimeStr: nextRunDate.toLocaleString() };
     };
 
-    const scheduleNextRun = () => {
-      const delay = getMsUntilNext8AM();
-      const targetTimeStr = new Date(Date.now() + delay).toLocaleString();
-      console.log(`[SCHEDULER] Próximo chequeo automático diario de alertas programado para: ${targetTimeStr} (en ${Math.round(delay / 1000 / 60)} minutos)`);
+    const scheduleNextRun = async () => {
+      const { delay, targetTimeStr } = await getMsUntilNextScheduledTime();
+      console.log(`[SCHEDULER] Próximo chequeo automático de alertas programado para: ${targetTimeStr} (en ${Math.round(delay / 1000 / 60)} minutos)`);
       
       setTimeout(async () => {
         await runDailyAlertsCheck();

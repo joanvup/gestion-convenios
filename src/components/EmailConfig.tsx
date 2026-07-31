@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, Send, Check, AlertCircle, Loader2, Info, Eye, EyeOff, ShieldAlert } from 'lucide-react';
+import { Mail, Send, Check, AlertCircle, Loader2, Info, Eye, EyeOff, ShieldAlert, Clock, Calendar } from 'lucide-react';
 
 interface EmailConfigProps {
   token: string;
@@ -12,7 +12,19 @@ interface EmailSettings {
   user: string;
   sender_name: string;
   enabled: number;
+  scheduled_time: string;
+  scheduled_days: string;
 }
+
+const DAYS_OF_WEEK = [
+  { id: '1', short: 'L', name: 'Lunes' },
+  { id: '2', short: 'M', name: 'Martes' },
+  { id: '3', short: 'X', name: 'Miércoles' },
+  { id: '4', short: 'J', name: 'Jueves' },
+  { id: '5', short: 'V', name: 'Viernes' },
+  { id: '6', short: 'S', name: 'Sábado' },
+  { id: '0', short: 'D', name: 'Domingo' }
+];
 
 export default function EmailConfig({ token }: EmailConfigProps) {
   const [settings, setSettings] = useState<EmailSettings>({
@@ -21,7 +33,9 @@ export default function EmailConfig({ token }: EmailConfigProps) {
     secure: 0,
     user: '',
     sender_name: 'Gestor de Convenios',
-    enabled: 0
+    enabled: 0,
+    scheduled_time: '08:00',
+    scheduled_days: '1,2,3,4,5'
   });
 
   const [password, setPassword] = useState('');
@@ -53,7 +67,9 @@ export default function EmailConfig({ token }: EmailConfigProps) {
           secure: Number(data.secure) || 0,
           user: data.user || '',
           sender_name: data.sender_name || 'Gestor de Convenios',
-          enabled: Number(data.enabled) || 0
+          enabled: Number(data.enabled) || 0,
+          scheduled_time: data.scheduled_time || '08:00',
+          scheduled_days: data.scheduled_days || '1,2,3,4,5'
         });
       }
     } catch (err) {
@@ -61,6 +77,35 @@ export default function EmailConfig({ token }: EmailConfigProps) {
       setFeedback({ type: 'error', message: 'No se pudo cargar la configuración de correo.' });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const toggleScheduledDay = (dayId: string) => {
+    const currentList = (settings.scheduled_days || '1,2,3,4,5')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    
+    let updatedList: string[];
+    if (currentList.includes(dayId)) {
+      updatedList = currentList.filter(d => d !== dayId);
+    } else {
+      updatedList = [...currentList, dayId];
+    }
+    
+    const orderMap: Record<string, number> = { '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '0': 7 };
+    updatedList.sort((a, b) => (orderMap[a] || 99) - (orderMap[b] || 99));
+
+    setSettings({ ...settings, scheduled_days: updatedList.join(',') });
+  };
+
+  const setDaysPreset = (preset: 'weekdays' | 'all' | 'weekend') => {
+    if (preset === 'weekdays') {
+      setSettings({ ...settings, scheduled_days: '1,2,3,4,5' });
+    } else if (preset === 'all') {
+      setSettings({ ...settings, scheduled_days: '1,2,3,4,5,6,0' });
+    } else if (preset === 'weekend') {
+      setSettings({ ...settings, scheduled_days: '6,0' });
     }
   };
 
@@ -209,6 +254,159 @@ export default function EmailConfig({ token }: EmailConfigProps) {
                 />
                 <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:height-5 after:width-5 after:transition-all peer-checked:bg-indigo-600"></div>
               </label>
+            </div>
+
+            {/* Scheduled Time Selector */}
+            <div className="bg-indigo-50/70 p-4 rounded-xl border border-indigo-150 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 bg-indigo-600 text-white rounded-lg">
+                    <Clock className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-slate-800 block">Horario de Ejecución Diaria de Alertas</span>
+                    <span className="text-[11px] text-slate-500 block">Hora exacta del día en que el servidor revisará vencimientos y enviará correos.</span>
+                  </div>
+                </div>
+                <span className="text-[11px] font-bold text-indigo-700 bg-indigo-100 px-2.5 py-1 rounded-full border border-indigo-200/80">
+                  {settings.scheduled_time || '08:00'}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Hora Exacta:</label>
+                  <input 
+                    type="time" 
+                    value={settings.scheduled_time || '08:00'}
+                    onChange={(e) => setSettings({ ...settings, scheduled_time: e.target.value })}
+                    className="px-3 py-1.5 bg-white border border-indigo-200 hover:border-indigo-300 focus:border-indigo-600 rounded-xl text-xs font-bold text-slate-900 focus:outline-none shadow-2xs"
+                    required
+                  />
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-0.5">Atajos:</span>
+                  {[
+                    { time: '07:00', label: '07:00 AM' },
+                    { time: '08:00', label: '08:00 AM' },
+                    { time: '09:00', label: '09:00 AM' },
+                    { time: '13:00', label: '01:00 PM' },
+                    { time: '18:00', label: '06:00 PM' }
+                  ].map((preset) => (
+                    <button
+                      key={preset.time}
+                      type="button"
+                      onClick={() => setSettings({ ...settings, scheduled_time: preset.time })}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all ${
+                        (settings.scheduled_time || '08:00') === preset.time
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'bg-white hover:bg-indigo-100/80 text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Scheduled Days Selector */}
+            <div className="bg-indigo-50/70 p-4 rounded-xl border border-indigo-150 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 bg-indigo-600 text-white rounded-lg">
+                    <Calendar className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-slate-800 block">Días de Ejecución Semanal</span>
+                    <span className="text-[11px] text-slate-500 block">Selecciona qué días de la semana se enviarán las alertas automáticas.</span>
+                  </div>
+                </div>
+                
+                <span className="text-[11px] font-bold text-indigo-700 bg-indigo-100 px-2.5 py-1 rounded-full border border-indigo-200/80">
+                  {(() => {
+                    const selected = (settings.scheduled_days || '1,2,3,4,5').split(',').map(s => s.trim()).filter(Boolean);
+                    if (selected.length === 7) return 'Todos los días (7/7)';
+                    if (selected.length === 5 && ['1','2','3','4','5'].every(d => selected.includes(d))) return 'Lunes a Viernes (Días laborables)';
+                    if (selected.length === 2 && selected.includes('6') && selected.includes('0')) return 'Fines de semana (Sáb - Dom)';
+                    if (selected.length === 0) return 'Sin días seleccionados';
+                    return `${selected.length} día${selected.length > 1 ? 's' : ''} activo${selected.length > 1 ? 's' : ''}`;
+                  })()}
+                </span>
+              </div>
+
+              {/* Day Buttons */}
+              <div className="space-y-2.5 pt-1">
+                <div className="grid grid-cols-7 gap-1.5">
+                  {DAYS_OF_WEEK.map((day) => {
+                    const isSelected = (settings.scheduled_days || '1,2,3,4,5').split(',').map(s => s.trim()).includes(day.id);
+                    const isWeekend = day.id === '6' || day.id === '0';
+                    return (
+                      <button
+                        key={day.id}
+                        type="button"
+                        onClick={() => toggleScheduledDay(day.id)}
+                        className={`py-2 px-1 rounded-xl text-xs font-bold transition-all flex flex-col items-center justify-center gap-0.5 border cursor-pointer ${
+                          isSelected
+                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-indigo-50 hover:border-indigo-200'
+                        }`}
+                        title={`Hacer clic para ${isSelected ? 'desactivar' : 'activar'} ${day.name}`}
+                      >
+                        <span className={`text-[9px] uppercase font-mono tracking-tight ${isSelected ? 'text-indigo-200' : isWeekend ? 'text-amber-600 font-extrabold' : 'text-slate-400'}`}>
+                          {day.name.substring(0, 3)}
+                        </span>
+                        <span className="text-sm font-extrabold">{day.short}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Shortcuts & Note */}
+                <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-indigo-100">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-0.5">Preajustes:</span>
+                    <button
+                      type="button"
+                      onClick={() => setDaysPreset('weekdays')}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                        (settings.scheduled_days || '1,2,3,4,5') === '1,2,3,4,5'
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'bg-white hover:bg-indigo-100/80 text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      Lunes a Viernes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDaysPreset('all')}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                        (settings.scheduled_days || '1,2,3,4,5') === '1,2,3,4,5,6,0'
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'bg-white hover:bg-indigo-100/80 text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      Todos los Días
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDaysPreset('weekend')}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                        (settings.scheduled_days || '1,2,3,4,5') === '6,0'
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'bg-white hover:bg-indigo-100/80 text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      Solo Fines de Semana
+                    </button>
+                  </div>
+
+                  <p className="text-[10px] text-slate-500 font-medium italic">
+                    *(Evita notificaciones automáticas los días no marcados)*
+                  </p>
+                </div>
+              </div>
             </div>
 
             {/* Grid for SMTP details */}

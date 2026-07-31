@@ -109,6 +109,8 @@ export default function AlertPanel({ alerts, onDismiss, onSelectConvenio }: Aler
                     <p className="text-xs font-semibold text-slate-500 mt-1">
                       {alert.diasRestantes < 0 
                         ? `Vencido hace ${Math.abs(alert.diasRestantes)} días` 
+                        : alert.diasRestantes === 0
+                        ? 'Vence hoy'
                         : `Vence en ${alert.diasRestantes} días`}
                     </p>
                   )}

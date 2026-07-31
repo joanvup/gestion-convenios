@@ -254,7 +254,7 @@ export default function TimelineView({ convenios, onSelectConvenio }: TimelineVi
                         {m.diasRestantes < 0
                           ? `Hace ${Math.abs(m.diasRestantes)} días`
                           : m.diasRestantes === 0
-                          ? '¡Hoy!'
+                          ? 'Vence hoy'
                           : `Faltan ${m.diasRestantes} días`}
                       </span>
                     </p>

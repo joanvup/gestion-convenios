@@ -4,6 +4,17 @@ import path from 'path';
 
 let dbInstance: Database | null = null;
 
+export async function closeDb(): Promise<void> {
+  if (dbInstance) {
+    try {
+      await dbInstance.close();
+    } catch (e) {
+      console.error('Error al cerrar base de datos:', e);
+    }
+    dbInstance = null;
+  }
+}
+
 export async function getDb(): Promise<Database> {
   if (dbInstance) {
     return dbInstance;
@@ -95,9 +106,23 @@ export async function getDb(): Promise<Database> {
       user TEXT NOT NULL DEFAULT '',
       pass TEXT NOT NULL DEFAULT '',
       sender_name TEXT DEFAULT 'Gestor de Convenios',
-      enabled INTEGER NOT NULL DEFAULT 0
+      enabled INTEGER NOT NULL DEFAULT 0,
+      scheduled_time TEXT DEFAULT '08:00',
+      scheduled_days TEXT DEFAULT '1,2,3,4,5'
     )
   `);
+
+  try {
+    await dbInstance.exec("ALTER TABLE email_settings ADD COLUMN scheduled_time TEXT DEFAULT '08:00'");
+  } catch (e) {
+    // Column already exists
+  }
+
+  try {
+    await dbInstance.exec("ALTER TABLE email_settings ADD COLUMN scheduled_days TEXT DEFAULT '1,2,3,4,5'");
+  } catch (e) {
+    // Column already exists
+  }
 
   // Create Audit Logs Table
   await dbInstance.exec(`
