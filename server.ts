@@ -212,30 +212,60 @@ async function startServer() {
   let appVersion = getAppVersion();
 
   // Helper to send email notifications using settings from SQLite database
-  const sendEmail = async ({ to, subject, html }: { to: string; subject: string; html: string }) => {
+  const sendEmail = async ({
+    to,
+    subject,
+    html,
+    ignoreEnabled = false,
+  }: {
+    to: string;
+    subject: string;
+    html: string;
+    ignoreEnabled?: boolean;
+  }): Promise<{ success: boolean; error?: string }> => {
     try {
       const db = await getDb();
       const settings = await db.get("SELECT * FROM email_settings LIMIT 1");
-      if (!settings || !settings.enabled) {
-        console.log("Notificaciones por correo desactivadas o no configuradas.");
-        return false;
+
+      if (!settings) {
+        console.log("No hay configuración de correo en la base de datos.");
+        return {
+          success: false,
+          error: "No hay configuración de correo SMTP en la base de datos. Un administrador debe configurar el correo saliente en los Ajustes de Correo.",
+        };
       }
+
+      // If ignoreEnabled is false (e.g. for automatic scheduled notifications), check settings.enabled
+      if (!ignoreEnabled && !settings.enabled) {
+        console.log("Notificaciones por correo desactivadas en la configuración.");
+        return {
+          success: false,
+          error: "Las notificaciones por correo están desactivadas en los Ajustes de Correo del sistema.",
+        };
+      }
+
       if (!settings.user || !settings.pass) {
         console.log("Usuario o contraseña de correo no configurados en los ajustes.");
-        return false;
+        return {
+          success: false,
+          error: "El usuario o la contraseña del servidor SMTP no están configurados. Un administrador debe configurarlos en los Ajustes de Correo.",
+        };
       }
 
       const transporter = nodemailer.createTransport({
-        host: settings.host,
-        port: Number(settings.port),
+        host: settings.host || "smtp.gmail.com",
+        port: Number(settings.port) || 587,
         secure: Number(settings.secure) === 1,
         auth: {
           user: settings.user,
           pass: settings.pass,
         },
-        connectionTimeout: 5000,
-        greetingTimeout: 5000,
-        socketTimeout: 8000,
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
+        tls: {
+          rejectUnauthorized: false,
+        },
       });
 
       const mailOptions = {
@@ -247,19 +277,33 @@ async function startServer() {
 
       const sendPromise = transporter.sendMail(mailOptions);
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Tiempo de espera (6s) agotado al conectar al servidor SMTP")), 6000)
+        setTimeout(() => reject(new Error("Tiempo de espera (8s) agotado al conectar al servidor SMTP")), 8000)
       );
 
       const info: any = await Promise.race([sendPromise, timeoutPromise]);
       console.log(`Correo enviado correctamente a ${to}: ${info.messageId}`);
-      return true;
+      return { success: true };
     } catch (error: any) {
-      if (error && error.message && (error.message.includes('534') || error.message.includes('Invalid login'))) {
-        console.error("[SMTP ERROR 534] Autenticación rechazada por Google/Gmail. Asegúrate de configurar una Contraseña de Aplicación (App Password) de 16 dígitos en los ajustes de correo en lugar de la contraseña regular de la cuenta.");
+      let errorMsg = error?.message || "Error desconocido al enviar correo";
+      if (
+        errorMsg.includes("534") ||
+        errorMsg.includes("Invalid login") ||
+        errorMsg.includes("Username and Password not accepted")
+      ) {
+        errorMsg =
+          "Autenticación rechazada por el servidor de correo (Google/Gmail Error 534). Si usas Gmail o Google Workspace, debes usar una 'Contraseña de Aplicación' (App Password) de 16 caracteres generada en tu cuenta de Google (myaccount.google.com/apppasswords), en lugar de tu contraseña normal.";
+        console.error("[SMTP ERROR 534]", errorMsg);
+      } else if (
+        errorMsg.includes("ETIMEDOUT") ||
+        errorMsg.includes("ECONNREFUSED") ||
+        errorMsg.includes("Tiempo de espera")
+      ) {
+        errorMsg = `No se pudo conectar al servidor SMTP (${errorMsg}). Verifica que el host (ej: smtp.gmail.com) y puerto (587 o 465) sean correctos.`;
+        console.error("[SMTP CONNECTION ERROR]", errorMsg);
       } else {
         console.error("Error al enviar correo electrónico:", error);
       }
-      return false;
+      return { success: false, error: errorMsg };
     }
   };
 
@@ -342,7 +386,7 @@ async function startServer() {
       );
 
       // Send verification code strictly via email
-      const emailSent = await sendEmail({
+      const emailResult = await sendEmail({
         to: user.email,
         subject: "Código de recuperación de contraseña - Gestor de Convenios",
         html: `
@@ -357,14 +401,15 @@ async function startServer() {
             <p style="font-size: 13px; color: #64748b;">Este código expirará en 15 minutos.</p>
             <p style="font-size: 13px; color: #64748b;">Si no solicitaste este cambio, puedes ignorar este mensaje de forma segura.</p>
           </div>
-        `
+        `,
+        ignoreEnabled: true,
       });
 
-      await logAudit(db, user, "SOLICITUD_RECUPERACION", "user", user.id, `Código de recuperación enviado a ${user.email}`);
+      await logAudit(db, user, "SOLICITUD_RECUPERACION", "user", user.id, `Código de recuperación solicitado para ${user.email}`);
 
-      if (!emailSent) {
+      if (!emailResult.success) {
         return res.status(400).json({
-          error: "No se pudo enviar el correo con el código de verificación. Verifica que el servidor de correo SMTP esté configurado y activo en el sistema."
+          error: emailResult.error || "No se pudo enviar el correo con el código de verificación."
         });
       }
 
@@ -749,13 +794,13 @@ async function startServer() {
               </div>
             `;
 
-            const success = await sendEmail({ to: recipient, subject, html });
-            if (success) {
+            const emailRes = await sendEmail({ to: recipient, subject, html });
+            if (emailRes.success) {
               notifiedCount++;
               details.push(`Notificado con éxito ${c.codigo} a ${recipient}`);
             } else {
               failedCount++;
-              details.push(`Error al enviar ${c.codigo} a ${recipient}`);
+              details.push(`Error al enviar ${c.codigo} a ${recipient}: ${emailRes.error || 'Error desconocido'}`);
             }
           } else {
             details.push(`Convenio ${c.codigo} tiene alertas pero no tiene correo responsable asignado`);
@@ -2084,12 +2129,12 @@ async function startServer() {
               </div>
             `;
 
-            const success = await sendEmail({ to: recipient, subject, html });
-            if (success) {
+            const emailRes = await sendEmail({ to: recipient, subject, html });
+            if (emailRes.success) {
               sentCount++;
               console.log(`[SCHEDULER] Notificación enviada con éxito para ${c.codigo} a ${recipient}`);
             } else {
-              console.error(`[SCHEDULER] Error al enviar notificación de ${c.codigo} a ${recipient}`);
+              console.error(`[SCHEDULER] Error al enviar notificación de ${c.codigo} a ${recipient}: ${emailRes.error || ''}`);
             }
           }
         }
