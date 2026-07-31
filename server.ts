@@ -211,6 +211,44 @@ async function startServer() {
 
   let appVersion = getAppVersion();
 
+  // Helper to build Nodemailer Transporter with fallback logic
+  const createNodemailerTransporter = (host: string, port: number, secure: boolean, user: string, pass: string, forceServiceGmail = false) => {
+    const cleanUser = (user || "").trim();
+    const cleanPass = (pass || "").replace(/[\s\u00A0]/g, "").trim();
+
+    if (forceServiceGmail || (host && host.toLowerCase().includes("gmail") && port === 465)) {
+      return nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: cleanUser,
+          pass: cleanPass,
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 12000,
+        tls: {
+          rejectUnauthorized: false,
+        },
+      });
+    }
+
+    return nodemailer.createTransport({
+      host: host || "smtp.gmail.com",
+      port: Number(port) || 587,
+      secure: Number(secure) === 1,
+      auth: {
+        user: cleanUser,
+        pass: cleanPass,
+      },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 12000,
+      tls: {
+        rejectUnauthorized: false,
+      },
+    });
+  };
+
   // Helper to send email notifications using settings from SQLite database
   const sendEmail = async ({
     to,
@@ -252,47 +290,51 @@ async function startServer() {
         };
       }
 
-      const transporter = nodemailer.createTransport({
-        host: settings.host || "smtp.gmail.com",
-        port: Number(settings.port) || 587,
-        secure: Number(settings.secure) === 1,
-        auth: {
-          user: settings.user,
-          pass: (settings.pass || "").replace(/\s+/g, ""),
-        },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
-        socketTimeout: 10000,
-        tls: {
-          rejectUnauthorized: false,
-        },
-      });
+      const transporter = createNodemailerTransporter(settings.host, settings.port, settings.secure, settings.user, settings.pass);
 
       const mailOptions = {
-        from: `"${settings.sender_name || 'Gestor de Convenios'}" <${settings.user}>`,
+        from: `"${settings.sender_name || 'Gestor de Convenios'}" <${settings.user.trim()}>`,
         to,
         subject,
         html,
       };
 
-      const sendPromise = transporter.sendMail(mailOptions);
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Tiempo de espera (8s) agotado al conectar al servidor SMTP")), 8000)
-      );
+      try {
+        const sendPromise = transporter.sendMail(mailOptions);
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Tiempo de espera (10s) agotado al conectar al servidor SMTP")), 10000)
+        );
 
-      const info: any = await Promise.race([sendPromise, timeoutPromise]);
-      console.log(`Correo enviado correctamente a ${to}: ${info.messageId}`);
-      return { success: true };
+        const info: any = await Promise.race([sendPromise, timeoutPromise]);
+        console.log(`Correo enviado correctamente a ${to}: ${info.messageId}`);
+        return { success: true };
+      } catch (firstErr: any) {
+        const isGoogle = (settings.host || "").toLowerCase().includes("gmail") || (settings.user || "").toLowerCase().includes("gmail") || (settings.user || "").toLowerCase().includes("edu");
+        if (isGoogle) {
+          console.log("[SMTP FALLBACK] Reintentando con servicio 'gmail'...");
+          try {
+            const fallbackTransporter = createNodemailerTransporter(settings.host, settings.port, settings.secure, settings.user, settings.pass, true);
+            const info: any = await fallbackTransporter.sendMail(mailOptions);
+            console.log(`[SMTP FALLBACK ÉXITO] Correo enviado a ${to}: ${info.messageId}`);
+            return { success: true };
+          } catch (fallbackErr: any) {
+            console.error("[SMTP FALLBACK FALLÓ]", fallbackErr);
+            throw fallbackErr;
+          }
+        }
+        throw firstErr;
+      }
     } catch (error: any) {
       let errorMsg = error?.message || "Error desconocido al enviar correo";
       if (
         errorMsg.includes("534") ||
         errorMsg.includes("Invalid login") ||
-        errorMsg.includes("Username and Password not accepted")
+        errorMsg.includes("Username and Password not accepted") ||
+        errorMsg.includes("535")
       ) {
         errorMsg =
-          "Autenticación rechazada por el servidor de correo (Google/Gmail Error 534). Si usas Gmail o Google Workspace, debes usar una 'Contraseña de Aplicación' (App Password) de 16 caracteres generada en tu cuenta de Google (myaccount.google.com/apppasswords), en lugar de tu contraseña normal.";
-        console.error("[SMTP ERROR 534]", errorMsg);
+          "Autenticación rechazada por el servidor de correo (Google/Gmail Error 534/535). Revisa 3 posibles causas: 1) Si usas un correo institucional (@colegiobilingue.edu.co / @universidad.edu.co), el administrador de Google Workspace debe activar 'SMTP AUTH' en la Consola de Administración (admin.google.com -> Seguridad -> Acceso de usuarios). 2) La cuenta debe tener activa la 'Verificación en 2 pasos'. 3) Debes ingresar una 'Contraseña de Aplicación' de 16 caracteres generada en myaccount.google.com/apppasswords sin espacios ni comillas.";
+        console.error("[SMTP ERROR 534/535]", errorMsg);
       } else if (
         errorMsg.includes("ETIMEDOUT") ||
         errorMsg.includes("ECONNREFUSED") ||
@@ -702,34 +744,30 @@ async function startServer() {
       }
 
       // Perform real SMTP handshake test with nodemailer verify()
-      const transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure,
-        auth: {
-          user: emailUser,
-          pass: cleanedPass,
-        },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
-        socketTimeout: 10000,
-        tls: {
-          rejectUnauthorized: false,
-        },
-      });
+      let transporter = createNodemailerTransporter(host, port, secure, emailUser, emailPass);
+      let usedFallback = false;
 
-      const verifyPromise = transporter.verify();
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Tiempo de espera (8s) superado al conectar con el servidor SMTP.")), 8000)
-      );
-
-      await Promise.race([verifyPromise, timeoutPromise]);
+      try {
+        await transporter.verify();
+      } catch (firstErr: any) {
+        const isGoogle = host.toLowerCase().includes("gmail") || emailUser.toLowerCase().includes("gmail") || emailUser.toLowerCase().includes("edu");
+        if (isGoogle) {
+          console.log("[DIAGNOSTIC FALLBACK] Probando con servicio 'gmail'...");
+          const fallbackTransporter = createNodemailerTransporter(host, port, secure, emailUser, emailPass, true);
+          await fallbackTransporter.verify();
+          usedFallback = true;
+        } else {
+          throw firstErr;
+        }
+      }
 
       return res.json({
         success: true,
         configured: true,
         enabled,
-        message: "¡Conexión SMTP y autenticación verificadas exitosamente con los parámetros guardados en la base de datos!",
+        message: usedFallback
+          ? "¡Conexión SMTP y autenticación verificadas exitosamente usando el conector optimizado para Gmail/Google Workspace!"
+          : "¡Conexión SMTP y autenticación verificadas exitosamente con los parámetros guardados en la base de datos!",
         details: {
           host,
           port,
@@ -738,7 +776,8 @@ async function startServer() {
           enabled,
           passLength,
           hasSpacesInSavedPass: hasSpaces,
-          connectionStatus: "OK - Servidor respondió positivamente (250 OK)"
+          connectionStatus: "OK - Servidor respondió positivamente (250 OK)",
+          usedFallbackMode: usedFallback
         }
       });
     } catch (err: any) {
@@ -758,8 +797,8 @@ async function startServer() {
 
       if (rawError.includes("534") || rawError.includes("Invalid login") || rawError.includes("Username and Password not accepted") || rawError.includes("535")) {
         category = "AUTENTICACION_RECHAZADA";
-        friendlyError = "El servidor SMTP (Google / Gmail) rechazó el usuario o la contraseña (Error 534 / 535).";
-        suggestion = "Google/Gmail no permite usar la contraseña normal de la cuenta. Debes hacer lo siguiente: 1) Activar la verificación en 2 pasos en tu cuenta de Google. 2) Ir a https://myaccount.google.com/apppasswords. 3) Generar una 'Contraseña de Aplicación' de 16 letras. 4) Copiar y pegar esa clave de 16 caracteres en la casilla de Contraseña en Ajustes de Correo y guardar cambios.";
+        friendlyError = "El servidor de correo de Google rechazó el usuario o la contraseña (Error 534/535).";
+        suggestion = "Si estás utilizando una cuenta de Google o Google Workspace (como @colegiobilingue.edu.co o @universidad.edu.co), revisa estos 3 requisitos obligatorios: 1) Si es un correo institucional o corporativo, el Administrador del Dominio en la Consola de Google Workspace (admin.google.com) DEBE tener habilitada la opción 'Permitir a los usuarios enviar correo mediante SMTP AUTH' (Consola Admin -> Seguridad -> Acceso a datos -> SMTP AUTH). 2) Debes tener activa la 'Verificación en 2 pasos' en la cuenta. 3) Debes ingresar una 'Contraseña de Aplicación' de 16 letras generada en https://myaccount.google.com/apppasswords.";
       } else if (rawError.includes("ETIMEDOUT") || rawError.includes("ECONNREFUSED") || rawError.includes("Tiempo de espera")) {
         category = "ERROR_CONEXION";
         friendlyError = `No se pudo establecer conexión de red con ${host}:${port}.`;
@@ -817,28 +856,29 @@ async function startServer() {
         });
       }
 
-      const transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure,
-        auth: {
-          user: emailUser,
-          pass: emailPass.replace(/\s+/g, ""),
-        },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
-        socketTimeout: 10000,
-        tls: {
-          rejectUnauthorized: false,
-        },
-      });
+      let transporter = createNodemailerTransporter(host, port, secure, emailUser, emailPass);
+      let usedFallback = false;
 
-      await transporter.verify();
+      try {
+        await transporter.verify();
+      } catch (firstErr: any) {
+        const isGoogle = host.toLowerCase().includes("gmail") || emailUser.toLowerCase().includes("gmail") || emailUser.toLowerCase().includes("edu");
+        if (isGoogle) {
+          console.log("[POST DIAGNOSTIC FALLBACK] Probando con servicio 'gmail'...");
+          const fallbackTransporter = createNodemailerTransporter(host, port, secure, emailUser, emailPass, true);
+          await fallbackTransporter.verify();
+          usedFallback = true;
+        } else {
+          throw firstErr;
+        }
+      }
 
       return res.json({
         success: true,
-        message: "¡Prueba de conexión SMTP exitosa!",
-        details: { host, port, secure, user: emailUser }
+        message: usedFallback
+          ? "¡Prueba de conexión SMTP exitosa utilizando conector de respaldo de Gmail/Google Workspace!"
+          : "¡Prueba de conexión SMTP exitosa!",
+        details: { host, port, secure, user: emailUser, usedFallbackMode: usedFallback }
       });
     } catch (err: any) {
       console.error("[POST DIAGNOSTIC SMTP ERROR]", err);
@@ -848,7 +888,7 @@ async function startServer() {
 
       if (rawError.includes("534") || rawError.includes("Invalid login") || rawError.includes("Username and Password not accepted") || rawError.includes("535")) {
         friendlyError = "Autenticación rechazada por Google (Error 534/535).";
-        suggestion = "Asegúrate de estar usando una Contraseña de Aplicación de 16 caracteres de Google en lugar de tu contraseña normal.";
+        suggestion = "1) Si es una cuenta de Google Workspace (@colegiobilingue.edu.co / @universidad.edu.co), el administrador debe habilitar 'SMTP AUTH' en la Consola Admin. 2) La cuenta debe tener 'Verificación en 2 pasos' activa. 3) Usa una Contraseña de Aplicación de 16 caracteres.";
       }
 
       return res.status(400).json({
@@ -887,24 +927,10 @@ async function startServer() {
         return res.status(400).json({ error: "El correo emisor, la contraseña y el correo destino son obligatorios para la prueba." });
       }
 
-      const transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure,
-        auth: {
-          user: emailUser,
-          pass: emailPass.replace(/\s+/g, ""),
-        },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
-        socketTimeout: 10000,
-        tls: {
-          rejectUnauthorized: false,
-        },
-      });
+      let transporter = createNodemailerTransporter(host, port, secure, emailUser, emailPass);
 
       const mailOptions = {
-        from: `"${sender_name || 'Gestor de Convenios (Prueba)'}" <${emailUser}>`,
+        from: `"${sender_name || 'Gestor de Convenios (Prueba)'}" <${emailUser.trim()}>`,
         to,
         subject: "Prueba de Configuración de Correo - Gestor de Convenios",
         html: `
@@ -945,15 +971,27 @@ async function startServer() {
         `,
       };
 
-      await transporter.sendMail(mailOptions);
-      return res.json({ success: true, message: `Correo de prueba enviado con éxito a ${to}` });
+      try {
+        await transporter.sendMail(mailOptions);
+        return res.json({ success: true, message: `Correo de prueba enviado con éxito a ${to}` });
+      } catch (firstErr: any) {
+        const isGoogle = host.toLowerCase().includes("gmail") || emailUser.toLowerCase().includes("gmail") || emailUser.toLowerCase().includes("edu");
+        if (isGoogle) {
+          console.log("[EMAIL TEST FALLBACK] Probando con servicio 'gmail'...");
+          const fallbackTransporter = createNodemailerTransporter(host, port, secure, emailUser, emailPass, true);
+          await fallbackTransporter.sendMail(mailOptions);
+          return res.json({ success: true, message: `Correo de prueba enviado con éxito a ${to} (modo optimizado Gmail)` });
+        } else {
+          throw firstErr;
+        }
+      }
     } catch (err: any) {
       console.error("[EMAIL TEST ERROR]", err);
       const rawError = err?.message || String(err);
       let friendlyError = rawError;
 
       if (rawError.includes("534") || rawError.includes("Invalid login") || rawError.includes("Username and Password not accepted") || rawError.includes("535")) {
-        friendlyError = "Error de autenticación 534/535: Google/Gmail rechazó el usuario o la contraseña. Asegúrate de generar y usar una Contraseña de Aplicación de 16 caracteres de Google (https://myaccount.google.com/apppasswords) en lugar de tu contraseña normal.";
+        friendlyError = "Error de autenticación 534/535 de Google: El servidor de Google rechazó las credenciales. Si usas un correo institucional (@colegiobilingue.edu.co / @universidad.edu.co), el Administrador de Google Workspace debe habilitar 'SMTP AUTH' en la Consola Admin (admin.google.com -> Seguridad). También confirma tener activa la 'Verificación en 2 pasos' y usar una Contraseña de Aplicación de 16 caracteres.";
       }
 
       return res.status(400).json({ error: "Error al enviar correo de prueba: " + friendlyError, rawError });
