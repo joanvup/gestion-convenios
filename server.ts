@@ -190,17 +190,26 @@ async function startServer() {
     return alerts;
   };
 
-  // Read version dynamically from package.json
-  let appVersion = "1.0.5";
-  try {
-    const pkgPath = path.join(process.cwd(), "package.json");
-    if (fs.existsSync(pkgPath)) {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-      if (pkg.version) appVersion = pkg.version;
+  // Helper to resolve application version from public/version.json or package.json
+  const getAppVersion = (): string => {
+    try {
+      const versionJsonPath = path.join(process.cwd(), "public", "version.json");
+      if (fs.existsSync(versionJsonPath)) {
+        const data = JSON.parse(fs.readFileSync(versionJsonPath, "utf-8"));
+        if (data && data.version) return data.version;
+      }
+      const pkgPath = path.join(process.cwd(), "package.json");
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+        if (pkg && pkg.version) return pkg.version;
+      }
+    } catch (e) {
+      console.error("Error al leer versión de app:", e);
     }
-  } catch (e) {
-    console.error("Error al leer versión de package.json:", e);
-  }
+    return "1.0.6";
+  };
+
+  let appVersion = getAppVersion();
 
   // Helper to send email notifications using settings from SQLite database
   const sendEmail = async ({ to, subject, html }: { to: string; subject: string; html: string }) => {
@@ -244,8 +253,12 @@ async function startServer() {
       const info: any = await Promise.race([sendPromise, timeoutPromise]);
       console.log(`Correo enviado correctamente a ${to}: ${info.messageId}`);
       return true;
-    } catch (error) {
-      console.error("Error al enviar correo electrónico:", error);
+    } catch (error: any) {
+      if (error && error.message && (error.message.includes('534') || error.message.includes('Invalid login'))) {
+        console.error("[SMTP ERROR 534] Autenticación rechazada por Google/Gmail. Asegúrate de configurar una Contraseña de Aplicación (App Password) de 16 dígitos en los ajustes de correo en lugar de la contraseña regular de la cuenta.");
+      } else {
+        console.error("Error al enviar correo electrónico:", error);
+      }
       return false;
     }
   };
@@ -328,12 +341,12 @@ async function startServer() {
         [user.email, code, expiresAt]
       );
 
-      // Attempt sending email if SMTP is configured
-      const emailSent = await sendEmail({
+      // Trigger email sending in background or fast check
+      const emailPromise = sendEmail({
         to: user.email,
         subject: "Código de recuperación de contraseña - Gestor de Convenios",
         html: `
-          <div style="font-family: Arial, sans-serif; padding: 20px; color: #1e293b; max-width: 500px; margin: 0 auto; border: 1px solid #e2e8f0; rounded-xl: 12px;">
+          <div style="font-family: Arial, sans-serif; padding: 20px; color: #1e293b; max-width: 500px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px;">
             <h2 style="color: #4f46e5; margin-top: 0;">Restablecer contraseña</h2>
             <p>Hola <strong>${user.name}</strong>,</p>
             <p>Hemos recibido una solicitud para restablecer la contraseña de tu cuenta en el Sistema de Gestión de Convenios.</p>
@@ -346,6 +359,10 @@ async function startServer() {
           </div>
         `
       });
+
+      // Wait up to 1.5s for fast SMTP delivery, or proceed with code on screen
+      const quickTimeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1500));
+      const emailSent = await Promise.race([emailPromise, quickTimeout]);
 
       await logAudit(db, user, "SOLICITUD_RECUPERACION", "user", user.id, `Código de recuperación generado para ${user.email}`);
 
@@ -1957,16 +1974,7 @@ async function startServer() {
         }
       }
 
-      let liveVersion = appVersion;
-      try {
-        const pkgPath = path.join(process.cwd(), "package.json");
-        if (fs.existsSync(pkgPath)) {
-          const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-          if (pkg.version) liveVersion = pkg.version;
-        }
-      } catch (e) {
-        // fallback
-      }
+      let liveVersion = getAppVersion();
 
       return res.json({
         appVersion: liveVersion,
@@ -1988,17 +1996,7 @@ async function startServer() {
 
   // GET /api/system/version - Serves current application version
   app.get("/api/system/version", (req, res) => {
-    let liveVersion = appVersion;
-    try {
-      const pkgPath = path.join(process.cwd(), "package.json");
-      if (fs.existsSync(pkgPath)) {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-        if (pkg.version) liveVersion = pkg.version;
-      }
-    } catch (e) {
-      // fallback
-    }
-    return res.json({ version: liveVersion });
+    return res.json({ version: getAppVersion() });
   });
 
   // --- AUTOMATIC ALERTS SCHEDULER (BACKGROUND THREAD) ---

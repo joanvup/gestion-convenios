@@ -3,6 +3,8 @@ import path from 'node:path';
 
 const versionFilePath = path.resolve('src/version.ts');
 const packageJsonPath = path.resolve('package.json');
+const publicDirPath = path.resolve('public');
+const versionJsonPath = path.resolve('public/version.json');
 
 let currentVersion = '1.0.0';
 
@@ -31,8 +33,40 @@ if (parts.length === 3 && !parts.some(isNaN)) {
   currentVersion = '1.0.1';
 }
 
-// Update src/version.ts
-const versionTsContent = `export const APP_VERSION = "${currentVersion}";\n`;
+// Update src/version.ts with APP_VERSION constant and fetchAppVersion function
+const versionTsContent = `export const APP_VERSION = "${currentVersion}";
+
+/**
+ * Utility to fetch the current app version from static version.json or API, falling back to APP_VERSION
+ */
+export async function fetchAppVersion(): Promise<string> {
+  try {
+    const res = await fetch('/version.json?t=' + Date.now());
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.version) {
+        return data.version;
+      }
+    }
+  } catch {
+    // Fall back to API
+  }
+
+  try {
+    const res = await fetch('/api/system/version');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.version) {
+        return data.version;
+      }
+    }
+  } catch {
+    // Fall back to APP_VERSION
+  }
+
+  return APP_VERSION;
+}
+`;
 fs.writeFileSync(versionFilePath, versionTsContent, 'utf-8');
 
 // Update package.json
@@ -43,4 +77,17 @@ if (fs.existsSync(packageJsonPath)) {
   fs.writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
 }
 
-console.log(`[Version Bump] Incremented app version to v${currentVersion}`);
+// Ensure public directory exists and write public/version.json
+if (!fs.existsSync(publicDirPath)) {
+  fs.mkdirSync(publicDirPath, { recursive: true });
+}
+
+const versionJsonData = {
+  version: currentVersion,
+  updatedAt: new Date().toISOString()
+};
+
+fs.writeFileSync(versionJsonPath, JSON.stringify(versionJsonData, null, 2) + '\n', 'utf-8');
+
+console.log(`[Version Bump] Incremented app version to v${currentVersion} and saved public/version.json`);
+

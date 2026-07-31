@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User, Convenio, Alerta } from './types';
-import { APP_VERSION } from './version';
+import { APP_VERSION, fetchAppVersion } from './version';
 import Login from './components/Login';
 import ConvenioModal from './components/ConvenioModal';
 import ConvenioDetailModal from './components/ConvenioDetailModal';
@@ -34,12 +34,9 @@ export default function App() {
   const [currentVersion, setCurrentVersion] = useState<string>(APP_VERSION);
 
   useEffect(() => {
-    fetch('/api/system/version')
-      .then(res => res.json())
-      .then(data => {
-        if (data.version) setCurrentVersion(data.version);
-      })
-      .catch(() => {});
+    fetchAppVersion().then(v => {
+      if (v) setCurrentVersion(v);
+    });
   }, []);
 
   // Dark mode state

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Mail, Lock, ShieldAlert, CheckCircle2, ArrowLeft, KeyRound, Info, Tag } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { APP_VERSION } from '../version';
+import { APP_VERSION, fetchAppVersion } from '../version';
 
 interface LoginProps {
   onLoginSuccess: (token: string, userData: any) => void;
@@ -15,12 +15,9 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [currentVersion, setCurrentVersion] = useState<string>(APP_VERSION);
 
   useEffect(() => {
-    fetch('/api/system/version')
-      .then(res => res.json())
-      .then(data => {
-        if (data.version) setCurrentVersion(data.version);
-      })
-      .catch(() => {});
+    fetchAppVersion().then(v => {
+      if (v) setCurrentVersion(v);
+    });
   }, []);
 
   // Login form state
