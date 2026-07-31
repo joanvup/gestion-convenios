@@ -258,7 +258,7 @@ async function startServer() {
         secure: Number(settings.secure) === 1,
         auth: {
           user: settings.user,
-          pass: settings.pass,
+          pass: (settings.pass || "").replace(/\s+/g, ""),
         },
         connectionTimeout: 8000,
         greetingTimeout: 8000,
@@ -640,6 +640,226 @@ async function startServer() {
     }
   });
 
+  // Email Settings: Diagnostic endpoint to test real SMTP connection using saved DB credentials
+  app.get("/api/email-settings/diagnose", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado. Inicia sesión como administrador." });
+      }
+
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Acceso denegado. Se requieren permisos de administrador." });
+      }
+
+      const db = await getDb();
+      const settings = await db.get("SELECT * FROM email_settings LIMIT 1");
+
+      if (!settings) {
+        return res.status(400).json({
+          success: false,
+          configured: false,
+          error: "No existe registro de configuración de correo en la base de datos.",
+          suggestion: "Ingresa los parámetros de tu servidor SMTP (Host, Puerto, Usuario, Contraseña) en el panel de Ajustes de Correo y haz clic en Guardar."
+        });
+      }
+
+      const host = settings.host || "smtp.gmail.com";
+      const port = Number(settings.port) || 587;
+      const secure = Number(settings.secure) === 1;
+      const emailUser = settings.user || "";
+      const emailPass = settings.pass || "";
+      const enabled = Number(settings.enabled) === 1;
+
+      const passLength = emailPass.length;
+      const hasSpaces = emailPass.includes(" ");
+      const cleanedPass = emailPass.replace(/\s+/g, "");
+
+      if (!emailUser) {
+        return res.status(400).json({
+          success: false,
+          configured: false,
+          enabled,
+          host,
+          port,
+          user: emailUser,
+          error: "El campo de correo emisor (usuario) está vacío en la base de datos.",
+          suggestion: "Configura una dirección de correo válida (ej: tu-cuenta@gmail.com) en los Ajustes de Correo."
+        });
+      }
+
+      if (!emailPass) {
+        return res.status(400).json({
+          success: false,
+          configured: false,
+          enabled,
+          host,
+          port,
+          user: emailUser,
+          error: "La contraseña del servidor SMTP no está guardada en la base de datos.",
+          suggestion: "Escribe la contraseña de aplicación de 16 caracteres en Ajustes de Correo y haz clic en Guardar."
+        });
+      }
+
+      // Perform real SMTP handshake test with nodemailer verify()
+      const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure,
+        auth: {
+          user: emailUser,
+          pass: cleanedPass,
+        },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
+        tls: {
+          rejectUnauthorized: false,
+        },
+      });
+
+      const verifyPromise = transporter.verify();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Tiempo de espera (8s) superado al conectar con el servidor SMTP.")), 8000)
+      );
+
+      await Promise.race([verifyPromise, timeoutPromise]);
+
+      return res.json({
+        success: true,
+        configured: true,
+        enabled,
+        message: "¡Conexión SMTP y autenticación verificadas exitosamente con los parámetros guardados en la base de datos!",
+        details: {
+          host,
+          port,
+          secure,
+          user: emailUser,
+          enabled,
+          passLength,
+          hasSpacesInSavedPass: hasSpaces,
+          connectionStatus: "OK - Servidor respondió positivamente (250 OK)"
+        }
+      });
+    } catch (err: any) {
+      console.error("[DIAGNOSTIC SMTP ERROR]", err);
+
+      const db = await getDb();
+      const settings = await db.get("SELECT host, port, secure, user, pass, enabled FROM email_settings LIMIT 1");
+      const host = settings?.host || "smtp.gmail.com";
+      const port = Number(settings?.port) || 587;
+      const emailUser = settings?.user || "";
+      const emailPass = settings?.pass || "";
+      const rawError = err?.message || String(err);
+
+      let category = "DESCONOCIDO";
+      let friendlyError = rawError;
+      let suggestion = "Revisa los parámetros SMTP ingresados en el formulario de configuración de correo.";
+
+      if (rawError.includes("534") || rawError.includes("Invalid login") || rawError.includes("Username and Password not accepted") || rawError.includes("535")) {
+        category = "AUTENTICACION_RECHAZADA";
+        friendlyError = "El servidor SMTP (Google / Gmail) rechazó el usuario o la contraseña (Error 534 / 535).";
+        suggestion = "Google/Gmail no permite usar la contraseña normal de la cuenta. Debes hacer lo siguiente: 1) Activar la verificación en 2 pasos en tu cuenta de Google. 2) Ir a https://myaccount.google.com/apppasswords. 3) Generar una 'Contraseña de Aplicación' de 16 letras. 4) Copiar y pegar esa clave de 16 caracteres en la casilla de Contraseña en Ajustes de Correo y guardar cambios.";
+      } else if (rawError.includes("ETIMEDOUT") || rawError.includes("ECONNREFUSED") || rawError.includes("Tiempo de espera")) {
+        category = "ERROR_CONEXION";
+        friendlyError = `No se pudo establecer conexión de red con ${host}:${port}.`;
+        suggestion = `Verifica que el servidor host (${host}) y puerto (${port}) sean correctos. Para Gmail usa smtp.gmail.com con puerto 587 (TLS/STARTTLS) o puerto 465 (SSL).`;
+      } else if (rawError.includes("EAUTH") || rawError.includes("auth")) {
+        category = "ERROR_AUTH";
+        friendlyError = "Fallo de autenticación con las credenciales proporcionadas.";
+        suggestion = "Asegúrate de que la dirección de correo emisor coincida exactamente con la cuenta que generó la clave de aplicación.";
+      }
+
+      return res.status(400).json({
+        success: false,
+        configured: true,
+        category,
+        error: friendlyError,
+        rawError,
+        suggestion,
+        details: {
+          host,
+          port,
+          user: emailUser,
+          passLength: emailPass.length,
+          hasSpacesInSavedPass: emailPass.includes(" ")
+        }
+      });
+    }
+  });
+
+  // POST endpoint for diagnosis (supports JSON body test)
+  app.post("/api/email-settings/diagnose", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      if (user.role !== "admin") {
+        return res.status(403).json({ error: "Acceso denegado. Se requieren permisos de administrador." });
+      }
+
+      const db = await getDb();
+      const savedSettings = await db.get("SELECT * FROM email_settings LIMIT 1");
+
+      const host = req.body.host || savedSettings?.host || "smtp.gmail.com";
+      const port = Number(req.body.port) || Number(savedSettings?.port) || 587;
+      const secure = req.body.secure !== undefined ? Number(req.body.secure) === 1 : Number(savedSettings?.secure) === 1;
+      const emailUser = req.body.user || savedSettings?.user || "";
+      const emailPass = req.body.pass && req.body.pass.trim() ? req.body.pass.trim() : savedSettings?.pass || "";
+
+      if (!emailUser || !emailPass) {
+        return res.status(400).json({
+          success: false,
+          error: "Faltan credenciales de usuario o contraseña para realizar la prueba SMTP.",
+          suggestion: "Proporciona el correo emisor y la contraseña de aplicación de 16 dígitos."
+        });
+      }
+
+      const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure,
+        auth: {
+          user: emailUser,
+          pass: emailPass.replace(/\s+/g, ""),
+        },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
+        tls: {
+          rejectUnauthorized: false,
+        },
+      });
+
+      await transporter.verify();
+
+      return res.json({
+        success: true,
+        message: "¡Prueba de conexión SMTP exitosa!",
+        details: { host, port, secure, user: emailUser }
+      });
+    } catch (err: any) {
+      console.error("[POST DIAGNOSTIC SMTP ERROR]", err);
+      const rawError = err?.message || String(err);
+      let friendlyError = rawError;
+      let suggestion = "Revisa los parámetros SMTP ingresados.";
+
+      if (rawError.includes("534") || rawError.includes("Invalid login") || rawError.includes("Username and Password not accepted") || rawError.includes("535")) {
+        friendlyError = "Autenticación rechazada por Google (Error 534/535).";
+        suggestion = "Asegúrate de estar usando una Contraseña de Aplicación de 16 caracteres de Google en lugar de tu contraseña normal.";
+      }
+
+      return res.status(400).json({
+        success: false,
+        error: friendlyError,
+        rawError,
+        suggestion
+      });
+    }
+  });
+
   // Email Settings: Send a test email on-the-fly (Restricted to Admins)
   app.post("/api/email-settings/test", async (req, res) => {
     try {
@@ -652,18 +872,34 @@ async function startServer() {
         return res.status(403).json({ error: "Acceso denegado. Se requieren permisos de administrador." });
       }
 
-      const { host, port, secure, user: emailUser, pass, sender_name, to } = req.body;
-      if (!emailUser || !pass || !to) {
+      const db = await getDb();
+      const savedSettings = await db.get("SELECT * FROM email_settings LIMIT 1");
+
+      const host = req.body.host || savedSettings?.host || "smtp.gmail.com";
+      const port = Number(req.body.port) || Number(savedSettings?.port) || 587;
+      const secure = req.body.secure !== undefined ? Number(req.body.secure) === 1 : Number(savedSettings?.secure) === 1;
+      const emailUser = req.body.user || savedSettings?.user || "";
+      const emailPass = (req.body.pass && req.body.pass.trim()) ? req.body.pass.trim() : (savedSettings?.pass || "");
+      const sender_name = req.body.sender_name || savedSettings?.sender_name || "Gestor de Convenios";
+      const to = req.body.to;
+
+      if (!emailUser || !emailPass || !to) {
         return res.status(400).json({ error: "El correo emisor, la contraseña y el correo destino son obligatorios para la prueba." });
       }
 
       const transporter = nodemailer.createTransport({
-        host: host || "smtp.gmail.com",
-        port: Number(port) || 587,
-        secure: Number(secure) === 1,
+        host,
+        port,
+        secure,
         auth: {
           user: emailUser,
-          pass: pass,
+          pass: emailPass.replace(/\s+/g, ""),
+        },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
+        tls: {
+          rejectUnauthorized: false,
         },
       });
 
@@ -679,7 +915,7 @@ async function startServer() {
             <h2 style="color: #4f46e5; margin-top: 0; text-align: center; font-family: system-ui, sans-serif;">¡Conexión de Correo Exitosa!</h2>
             <p style="color: #334155; font-size: 15px; line-height: 1.6;">Estimado usuario,</p>
             <p style="color: #334155; font-size: 15px; line-height: 1.6;">Este es un correo de prueba enviado desde la plataforma <strong>Gestor de Convenios</strong>.</p>
-            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Tu configuración de servidor SMTP (Gmail con Contraseña de Aplicación) ha sido validada y está lista para enviar notificaciones automáticas a los responsables de convenios.</p>
+            <p style="color: #334155; font-size: 15px; line-height: 1.6;">Tu configuración de servidor SMTP ha sido validada y está lista para enviar notificaciones automáticas y códigos de verificación.</p>
             
             <div style="background-color: #f8fafc; border: 1px solid #f1f5f9; padding: 15px; border-radius: 8px; margin: 20px 0;">
               <h4 style="margin: 0 0 8px 0; color: #475569; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;">Detalles de la conexión:</h4>
@@ -698,7 +934,7 @@ async function startServer() {
                 </tr>
                 <tr>
                   <td style="padding: 4px 0; font-weight: bold;">SSL/TLS:</td>
-                  <td style="padding: 4px 0;">${Number(secure) === 1 ? "Sí" : "No (STARTTLS)"}</td>
+                  <td style="padding: 4px 0;">${secure ? "Sí" : "No (STARTTLS)"}</td>
                 </tr>
               </table>
             </div>
@@ -712,8 +948,15 @@ async function startServer() {
       await transporter.sendMail(mailOptions);
       return res.json({ success: true, message: `Correo de prueba enviado con éxito a ${to}` });
     } catch (err: any) {
-      console.error(err);
-      return res.status(500).json({ error: "Error al enviar correo de prueba: " + err.message });
+      console.error("[EMAIL TEST ERROR]", err);
+      const rawError = err?.message || String(err);
+      let friendlyError = rawError;
+
+      if (rawError.includes("534") || rawError.includes("Invalid login") || rawError.includes("Username and Password not accepted") || rawError.includes("535")) {
+        friendlyError = "Error de autenticación 534/535: Google/Gmail rechazó el usuario o la contraseña. Asegúrate de generar y usar una Contraseña de Aplicación de 16 caracteres de Google (https://myaccount.google.com/apppasswords) en lugar de tu contraseña normal.";
+      }
+
+      return res.status(400).json({ error: "Error al enviar correo de prueba: " + friendlyError, rawError });
     }
   });
 

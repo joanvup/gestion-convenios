@@ -145,6 +145,31 @@ export default function EmailConfig({ token }: EmailConfigProps) {
     }
   };
 
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnosticData, setDiagnosticData] = useState<any>(null);
+
+  const handleDiagnose = async () => {
+    setDiagnosing(true);
+    setDiagnosticData(null);
+
+    try {
+      const res = await fetch('/api/email-settings/diagnose', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      setDiagnosticData(data);
+    } catch (err: any) {
+      console.error(err);
+      setDiagnosticData({
+        success: false,
+        error: 'Error de red al conectar con el endpoint de diagnóstico.',
+        suggestion: 'Asegúrate de que la aplicación backend esté en ejecución.'
+      });
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
   const handleTest = async () => {
     if (!settings.user || !testRecipient) {
       setTestFeedback({ type: 'error', message: 'Por favor, introduce el correo emisor y el destinatario de prueba.' });
@@ -552,24 +577,90 @@ export default function EmailConfig({ token }: EmailConfigProps) {
           <div className="space-y-4">
             <div>
               <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Correo Destinatario de Prueba</label>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap sm:flex-nowrap gap-2">
                 <input 
                   type="email" 
                   value={testRecipient}
                   onChange={(e) => setTestRecipient(e.target.value)}
                   placeholder="destinatario@universidad.edu.co"
-                  className="flex-1 px-3 py-2 border border-slate-200 hover:border-slate-300 focus:border-indigo-500 rounded-xl text-xs font-semibold focus:outline-none transition-all"
+                  className="flex-1 min-w-[200px] px-3 py-2 border border-slate-200 hover:border-slate-300 focus:border-indigo-500 rounded-xl text-xs font-semibold focus:outline-none transition-all"
                 />
                 <button
                   type="button"
                   onClick={handleTest}
                   disabled={testing || !testRecipient}
-                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 text-white disabled:text-slate-400 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5"
+                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 text-white disabled:text-slate-400 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0"
                 >
                   {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
                   Enviar Prueba
                 </button>
               </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-700">Diagnóstico Real de Parámetros en BD</span>
+                <button
+                  type="button"
+                  onClick={handleDiagnose}
+                  disabled={diagnosing}
+                  className="px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 disabled:opacity-50 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border border-indigo-200/80"
+                >
+                  {diagnosing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> : <Info className="w-3.5 h-3.5 text-indigo-600" />}
+                  Ejecutar Diagnóstico SMTP
+                </button>
+              </div>
+
+              {diagnosticData && (
+                <div className={`p-4 rounded-xl border text-xs font-medium space-y-2.5 transition-all ${
+                  diagnosticData.success 
+                    ? 'bg-emerald-50/90 border-emerald-200 text-emerald-950' 
+                    : 'bg-rose-50/90 border-rose-200 text-rose-950'
+                }`}>
+                  <div className="flex items-center gap-2 font-bold text-sm">
+                    {diagnosticData.success ? (
+                      <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                    )}
+                    <span>{diagnosticData.success ? "Conexión Exitosa" : "Error en Conexión SMTP"}</span>
+                  </div>
+
+                  {diagnosticData.message && (
+                    <p className="text-xs font-semibold leading-relaxed">{diagnosticData.message}</p>
+                  )}
+
+                  {diagnosticData.error && (
+                    <div className="p-2.5 bg-white/80 rounded-lg border border-rose-200 text-rose-900 font-medium">
+                      <strong>Detalle:</strong> {diagnosticData.error}
+                    </div>
+                  )}
+
+                  {diagnosticData.suggestion && (
+                    <div className="p-2.5 bg-indigo-50/90 border border-indigo-200/80 rounded-lg text-indigo-950 space-y-1">
+                      <div className="font-bold text-[11px] text-indigo-900 uppercase tracking-wider flex items-center gap-1">
+                        <Info className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                        <span>Solución Sugerida:</span>
+                      </div>
+                      <p className="text-xs text-indigo-900 leading-relaxed">{diagnosticData.suggestion}</p>
+                    </div>
+                  )}
+
+                  {diagnosticData.details && (
+                    <div className="pt-2 border-t border-slate-200/60 text-[11px] text-slate-700 grid grid-cols-2 gap-x-4 gap-y-1">
+                      <div><strong>Host:</strong> {diagnosticData.details.host}</div>
+                      <div><strong>Puerto:</strong> {diagnosticData.details.port}</div>
+                      <div><strong>Usuario:</strong> {diagnosticData.details.user || 'No definido'}</div>
+                      <div><strong>Longitud Clave BD:</strong> {diagnosticData.details.passLength || 0} caracteres</div>
+                      {diagnosticData.details.hasSpacesInSavedPass && (
+                        <div className="col-span-2 text-amber-700 font-bold">
+                          ⚠️ Advertencia: La clave guardada contiene espacios. El backend los removerá automáticamente.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {testFeedback && (
