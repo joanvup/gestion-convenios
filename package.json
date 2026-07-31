@@ -1,10 +1,11 @@
 {
   "name": "react-example",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.0.5",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "bump-version": "node scripts/bump-version.js",
     "build": "node scripts/bump-version.js && vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",

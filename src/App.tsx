@@ -30,6 +30,18 @@ export default function App() {
   const [convenios, setConvenios] = useState<Convenio[]>([]);
   const [alerts, setAlerts] = useState<Alerta[]>([]);
 
+  // Version state
+  const [currentVersion, setCurrentVersion] = useState<string>(APP_VERSION);
+
+  useEffect(() => {
+    fetch('/api/system/version')
+      .then(res => res.json())
+      .then(data => {
+        if (data.version) setCurrentVersion(data.version);
+      })
+      .catch(() => {});
+  }, []);
+
   // Dark mode state
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     const saved = localStorage.getItem('convenios_theme');
@@ -327,7 +339,7 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <span className="text-base font-bold text-slate-900 block">Gestor de Convenios</span>
                   <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/80">
-                    v{APP_VERSION}
+                    v{currentVersion}
                   </span>
                 </div>
                 <span className="text-[10px] text-slate-400 font-mono font-medium block leading-none">SQLite Local DB</span>

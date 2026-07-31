@@ -190,6 +190,18 @@ async function startServer() {
     return alerts;
   };
 
+  // Read version dynamically from package.json
+  let appVersion = "1.0.5";
+  try {
+    const pkgPath = path.join(process.cwd(), "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      if (pkg.version) appVersion = pkg.version;
+    }
+  } catch (e) {
+    console.error("Error al leer versión de package.json:", e);
+  }
+
   // Helper to send email notifications using settings from SQLite database
   const sendEmail = async ({ to, subject, html }: { to: string; subject: string; html: string }) => {
     try {
@@ -212,6 +224,9 @@ async function startServer() {
           user: settings.user,
           pass: settings.pass,
         },
+        connectionTimeout: 5000,
+        greetingTimeout: 5000,
+        socketTimeout: 8000,
       });
 
       const mailOptions = {
@@ -221,7 +236,12 @@ async function startServer() {
         html,
       };
 
-      const info = await transporter.sendMail(mailOptions);
+      const sendPromise = transporter.sendMail(mailOptions);
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Tiempo de espera (6s) agotado al conectar al servidor SMTP")), 6000)
+      );
+
+      const info: any = await Promise.race([sendPromise, timeoutPromise]);
       console.log(`Correo enviado correctamente a ${to}: ${info.messageId}`);
       return true;
     } catch (error) {
@@ -1937,7 +1957,19 @@ async function startServer() {
         }
       }
 
+      let liveVersion = appVersion;
+      try {
+        const pkgPath = path.join(process.cwd(), "package.json");
+        if (fs.existsSync(pkgPath)) {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+          if (pkg.version) liveVersion = pkg.version;
+        }
+      } catch (e) {
+        // fallback
+      }
+
       return res.json({
+        appVersion: liveVersion,
         serverTimeISO: now.toISOString(),
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         emailSchedule: {
@@ -1952,6 +1984,21 @@ async function startServer() {
       console.error("Error in /api/system/time-status:", err);
       return res.status(500).json({ error: err.message });
     }
+  });
+
+  // GET /api/system/version - Serves current application version
+  app.get("/api/system/version", (req, res) => {
+    let liveVersion = appVersion;
+    try {
+      const pkgPath = path.join(process.cwd(), "package.json");
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+        if (pkg.version) liveVersion = pkg.version;
+      }
+    } catch (e) {
+      // fallback
+    }
+    return res.json({ version: liveVersion });
   });
 
   // --- AUTOMATIC ALERTS SCHEDULER (BACKGROUND THREAD) ---

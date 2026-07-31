@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Mail, Lock, ShieldAlert, CheckCircle2, ArrowLeft, KeyRound, Info, Tag } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { APP_VERSION } from '../version';
@@ -10,6 +10,18 @@ interface LoginProps {
 export default function Login({ onLoginSuccess }: LoginProps) {
   // Mode: 'login' | 'forgot' | 'reset'
   const [mode, setMode] = useState<'login' | 'forgot' | 'reset'>('login');
+
+  // Version state
+  const [currentVersion, setCurrentVersion] = useState<string>(APP_VERSION);
+
+  useEffect(() => {
+    fetch('/api/system/version')
+      .then(res => res.json())
+      .then(data => {
+        if (data.version) setCurrentVersion(data.version);
+      })
+      .catch(() => {});
+  }, []);
 
   // Login form state
   const [email, setEmail] = useState('');
@@ -158,7 +170,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             </h2>
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/80 shadow-2xs">
               <Tag className="w-3 h-3 text-indigo-500" />
-              v{APP_VERSION}
+              v{currentVersion}
             </span>
           </div>
           <p className="mt-1.5 text-xs sm:text-sm text-slate-500 font-medium">
@@ -409,7 +421,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         {/* Card Footer with Version */}
         <div className="pt-3 border-t border-slate-100 text-center">
           <p className="text-[11px] font-medium text-slate-400">
-            Sistema de Gestión de Convenios • <span className="font-semibold text-slate-600">v{APP_VERSION}</span>
+            Sistema de Gestión de Convenios • <span className="font-semibold text-slate-600">v{currentVersion}</span>
           </p>
         </div>
       </div>
