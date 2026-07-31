@@ -1,6 +1,7 @@
 import sqlite3 from 'sqlite3';
 import { open, Database } from 'sqlite';
 import path from 'path';
+import bcrypt from 'bcryptjs';
 
 let dbInstance: Database | null = null;
 
@@ -283,18 +284,34 @@ export async function getDb(): Promise<Database> {
   // Seed default users if they don't exist
   const adminUser = await dbInstance.get('SELECT * FROM users WHERE email = ?', ['admin@convenios.com']);
   if (!adminUser) {
+    const hashedAdminPass = bcrypt.hashSync('admin123', 10);
     await dbInstance.run(
       'INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
-      ['admin@convenios.com', 'admin123', 'Administrador Principal', 'admin']
+      ['admin@convenios.com', hashedAdminPass, 'Administrador Principal', 'admin']
     );
   }
 
   const defaultUser = await dbInstance.get('SELECT * FROM users WHERE email = ?', ['joan.fuentes@colegiobilingue.edu.co']);
   if (!defaultUser) {
+    const hashedUserPass = bcrypt.hashSync('convenios2026', 10);
     await dbInstance.run(
       'INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
-      ['joan.fuentes@colegiobilingue.edu.co', 'convenios2026', 'Joan Fuentes', 'usuario']
+      ['joan.fuentes@colegiobilingue.edu.co', hashedUserPass, 'Joan Fuentes', 'usuario']
     );
+  }
+
+  // Automatic Migration: Upgrade any existing plain text user passwords to bcrypt hashes
+  try {
+    const allUsers = await dbInstance.all('SELECT id, email, password FROM users');
+    for (const u of allUsers) {
+      if (u.password && !u.password.startsWith('$2a$') && !u.password.startsWith('$2b$') && !u.password.startsWith('$2y$')) {
+        const hashedPassword = bcrypt.hashSync(u.password, 10);
+        await dbInstance.run('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, u.id]);
+        console.log(`[SEGURIDAD BD] Contraseña migrada exitosamente a hash bcrypt para el usuario ${u.email}`);
+      }
+    }
+  } catch (migErr) {
+    console.error('[SEGURIDAD BD] Error al migrar contraseñas existentes:', migErr);
   }
 
   // Seed sample agreements if none exist

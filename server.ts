@@ -4,6 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { getDb, closeDb } from "./server/db.js";
 import nodemailer from "nodemailer";
+import bcrypt from "bcryptjs";
 
 async function startServer() {
   const app = express();
@@ -242,7 +243,27 @@ async function startServer() {
       const db = await getDb();
       const user = await db.get("SELECT * FROM users WHERE email = ?", [email]);
 
-      if (!user || user.password !== password) {
+      if (!user) {
+        return res.status(401).json({ error: "Credenciales incorrectas" });
+      }
+
+      let isMatch = false;
+      const storedPass = user.password || "";
+
+      // Check if stored password is a bcrypt hash
+      if (storedPass.startsWith("$2a$") || storedPass.startsWith("$2b$") || storedPass.startsWith("$2y$")) {
+        isMatch = bcrypt.compareSync(password, storedPass);
+      } else {
+        // Fallback for legacy plain text passwords with automatic upgrade
+        isMatch = storedPass === password;
+        if (isMatch) {
+          const hashedPass = bcrypt.hashSync(password, 10);
+          await db.run("UPDATE users SET password = ? WHERE id = ?", [hashedPass, user.id]);
+          console.log(`[SEGURIDAD BD] Contraseña del usuario ${user.email} migrada a hash bcrypt durante el login.`);
+        }
+      }
+
+      if (!isMatch) {
         return res.status(401).json({ error: "Credenciales incorrectas" });
       }
 
@@ -352,8 +373,9 @@ async function startServer() {
         return res.status(400).json({ error: "El código de verificación ha expirado (validez de 15 min). Solicita uno nuevo." });
       }
 
-      // Update password
-      await db.run("UPDATE users SET password = ? WHERE email = ?", [newPassword.trim(), email.trim()]);
+      // Update password with secure bcrypt hash
+      const hashedPassword = bcrypt.hashSync(newPassword.trim(), 10);
+      await db.run("UPDATE users SET password = ? WHERE email = ?", [hashedPassword, email.trim()]);
 
       // Mark token as used
       await db.run("UPDATE password_resets SET used = 1 WHERE id = ?", [resetRecord.id]);
@@ -401,9 +423,10 @@ async function startServer() {
         return res.status(400).json({ error: "El correo electrónico ya está registrado" });
       }
 
+      const hashedPassword = bcrypt.hashSync(password, 10);
       const result = await db.run(
         "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
-        [email, password, name, targetRole]
+        [email, hashedPassword, name, targetRole]
       );
 
       const newUser = await db.get("SELECT id, email, name, role FROM users WHERE id = ?", [result.lastID]);
