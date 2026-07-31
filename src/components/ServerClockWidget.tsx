@@ -31,15 +31,19 @@ export default function ServerClockWidget({ token, onOpenEmailConfig }: ServerCl
     try {
       const res = await fetch('/api/system/time-status');
       if (res.ok) {
-        const json: TimeStatusData = await res.json();
-        setData(json);
-        const serverDate = new Date(json.serverTimeISO);
-        const localNow = new Date();
-        setTimeOffset(serverDate.getTime() - localNow.getTime());
-        setCurrentServerTime(serverDate);
+        const contentType = res.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          const json: TimeStatusData = await res.json();
+          setData(json);
+          const serverDate = new Date(json.serverTimeISO);
+          const localNow = new Date();
+          setTimeOffset(serverDate.getTime() - localNow.getTime());
+          setCurrentServerTime(serverDate);
+        }
       }
     } catch (err) {
-      console.error('Error fetching server time status:', err);
+      // Silently handle transient connection/parser errors during server restart
+      console.warn('Unable to sync server time status:', err);
     } finally {
       setLoading(false);
     }
