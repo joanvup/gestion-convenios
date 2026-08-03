@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { X, Calendar, User, DollarSign, Clock, ShieldCheck, Activity, Mail } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { X, Calendar, User, DollarSign, Clock, ShieldCheck, Activity, Mail, History, ArrowRight } from 'lucide-react';
 import { Convenio } from '../types';
 
 interface ConvenioDetailModalProps {
@@ -9,10 +9,59 @@ interface ConvenioDetailModalProps {
   canEdit: boolean;
 }
 
-type TabType = 'general' | 'investigacion' | 'financiero' | 'fechas' | 'suspensiones';
+type TabType = 'general' | 'investigacion' | 'financiero' | 'fechas' | 'suspensiones' | 'historial';
 
 export default function ConvenioDetailModal({ convenio, onClose, onEdit, canEdit }: ConvenioDetailModalProps) {
   const [activeTab, setActiveTab] = useState<TabType>('general');
+  const [history, setHistory] = useState<any[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function fetchHistory() {
+      setIsLoadingHistory(true);
+      setHistoryError(null);
+      try {
+        const token = localStorage.getItem('convenios_token');
+        const res = await fetch(`/api/convenios/${convenio.id}/status-history`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setHistory(data);
+        } else {
+          setHistoryError('No se pudo cargar el historial de estados');
+        }
+      } catch (err) {
+        console.error(err);
+        setHistoryError('Error de red al cargar el historial');
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    }
+    fetchHistory();
+  }, [convenio.id]);
+
+  const getStatusBadgeStyle = (statusName: string) => {
+    switch (statusName) {
+      case 'Suspendido':
+        return 'bg-indigo-50 text-indigo-700 border-indigo-200';
+      case 'Vencido':
+        return 'bg-red-50 text-red-700 border-red-200';
+      case 'Vence Pronto (<30d)':
+        return 'bg-amber-50 text-amber-700 border-amber-200';
+      case 'Próximo (<90d)':
+        return 'bg-yellow-50 text-yellow-700 border-yellow-200';
+      case 'Vigente':
+        return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+      case 'Sin Fecha Fin':
+        return 'bg-slate-50 text-slate-600 border-slate-200';
+      default:
+        return 'bg-slate-100 text-slate-500 border-slate-200';
+    }
+  };
 
   const formatCurrency = (val: number | null) => {
     if (val === null || isNaN(val)) return 'No especificado';
@@ -103,7 +152,8 @@ export default function ConvenioDetailModal({ convenio, onClose, onEdit, canEdit
             { id: 'investigacion', label: 'Investigación', icon: User },
             { id: 'financiero', label: 'Financiero', icon: DollarSign },
             { id: 'fechas', label: 'Fechas y Plazos', icon: Clock },
-            { id: 'suspensiones', label: 'Suspensiones', icon: Activity }
+            { id: 'suspensiones', label: 'Suspensiones', icon: Activity },
+            { id: 'historial', label: 'Historial de Estados', icon: History }
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -192,6 +242,78 @@ export default function ConvenioDetailModal({ convenio, onClose, onEdit, canEdit
                 <p className="font-semibold text-slate-700 mb-1">Información de Suspensión:</p>
                 Si el convenio se suspende, se detiene el cómputo de plazos hasta la fecha de reinicio. Se recomienda reflejar estas novedades modificando las fechas finales en la pestaña de &quot;Fechas y Plazos&quot; para mantener los vencimientos actualizados en las alertas automáticas.
               </div>
+            </div>
+          )}
+
+          {activeTab === 'historial' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800">Ciclo de Vida del Convenio</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">Historial cronológico de cambios de estado y novedades del convenio</p>
+                </div>
+                <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-md">
+                  {history.length} Evento{history.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+
+              {isLoadingHistory ? (
+                <div className="py-12 flex flex-col items-center justify-center space-y-3">
+                  <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                  <p className="text-xs text-slate-500 font-semibold">Cargando historial de estados...</p>
+                </div>
+              ) : historyError ? (
+                <div className="p-4 bg-red-50 border border-red-100 rounded-xl text-xs text-red-700 text-center">
+                  {historyError}
+                </div>
+              ) : history.length === 0 ? (
+                <div className="py-12 text-center text-xs text-slate-400">
+                  No se han registrado cambios de estado para este convenio.
+                </div>
+              ) : (
+                <div className="relative pl-6 border-l-2 border-slate-100 space-y-8 ml-3 py-2">
+                  {history.map((event, idx) => {
+                    const eventDate = event.created_at ? event.created_at.substring(0, 10) : 'N/A';
+                    return (
+                      <div key={event.id || idx} className="relative group">
+                        {/* Timeline node icon */}
+                        <div className="absolute -left-[31px] top-1.5 w-4 h-4 rounded-full bg-white border-2 border-indigo-600 flex items-center justify-center transition-all group-hover:bg-indigo-600 group-hover:border-indigo-600">
+                          <div className="w-1.5 h-1.5 rounded-full bg-indigo-600 group-hover:bg-white"></div>
+                        </div>
+
+                        {/* Event Card */}
+                        <div className="bg-slate-50 hover:bg-slate-100/70 border border-slate-100 hover:border-slate-200 p-4 rounded-xl transition-all shadow-3xs space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-mono text-[11px] font-bold text-slate-500 bg-white border border-slate-100 px-2 py-0.5 rounded shadow-3xs">
+                              {eventDate}
+                            </span>
+                            <div className="flex items-center gap-1.5 text-xs">
+                              <span className={`px-2 py-0.5 text-[10px] font-bold uppercase rounded-full border ${getStatusBadgeStyle(event.old_status)}`}>
+                                {event.old_status}
+                              </span>
+                              <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                              <span className={`px-2 py-0.5 text-[10px] font-bold uppercase rounded-full border ${getStatusBadgeStyle(event.new_status)}`}>
+                                {event.new_status}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="text-xs font-semibold text-slate-700 leading-relaxed">
+                            {event.details}
+                          </div>
+
+                          <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-slate-100">
+                            <span>Modificado por: <strong className="text-slate-500">{event.changed_by_name || event.changed_by_email || 'Sistema'}</strong></span>
+                            {event.changed_by_email && (
+                              <span className="font-mono">{event.changed_by_email}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>

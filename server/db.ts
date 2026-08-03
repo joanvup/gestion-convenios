@@ -151,6 +151,21 @@ export async function getDb(): Promise<Database> {
     )
   `);
 
+  // Create Convenio Status History Table
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS convenio_status_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      convenio_id INTEGER NOT NULL,
+      old_status TEXT NOT NULL,
+      new_status TEXT NOT NULL,
+      changed_by_email TEXT,
+      changed_by_name TEXT,
+      details TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(convenio_id) REFERENCES convenios(id) ON DELETE CASCADE
+    )
+  `);
+
   // Create Planes de Servicio Table
   await dbInstance.exec(`
     CREATE TABLE IF NOT EXISTS planes_servicio (

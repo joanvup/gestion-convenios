@@ -49,6 +49,33 @@ async function startServer() {
     }
   };
 
+  // Helper to compute state string of a convenio
+  const getConvenioStatusString = (c: any): string => {
+    if (c.fecha_suspension && !c.fecha_reinicio) {
+      return 'Suspendido';
+    }
+
+    let effectiveEndDate = c.fecha_terminacion_prorroga || c.fecha_terminacion_ampliacion || c.fecha_terminacion;
+    if (!effectiveEndDate) {
+      return 'Sin Fecha Fin';
+    }
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const today = new Date(todayStr);
+    const end = new Date(effectiveEndDate);
+    const diffDays = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (diffDays < 0) {
+      return 'Vencido';
+    } else if (diffDays <= 30) {
+      return 'Vence Pronto (<30d)';
+    } else if (diffDays <= 90) {
+      return 'Próximo (<90d)';
+    } else {
+      return 'Vigente';
+    }
+  };
+
   // Helper to compute alerts for a single convenio
   const computeAlertsForConvenio = (c: any, todayStr: string, dismissedKeys: string[] = []) => {
     const alerts: any[] = [];
@@ -1189,6 +1216,96 @@ async function startServer() {
     }
   });
 
+  // Convenios: Get status history
+  app.get("/api/convenios/:id/status-history", async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autorizado" });
+      }
+
+      const { id } = req.params;
+      const db = await getDb();
+      const convenio = await db.get("SELECT * FROM convenios WHERE id = ?", [id]);
+
+      if (!convenio) {
+        return res.status(404).json({ error: "Convenio no encontrado" });
+      }
+
+      // 1. Fetch any logs from database
+      const rows = await db.all("SELECT * FROM convenio_status_history WHERE convenio_id = ? ORDER BY id ASC", [id]);
+
+      // 2. If no logs exist, let's dynamically reconstruct the initial history for existing records!
+      if (rows.length === 0) {
+        const tempHistory = [];
+        
+        // Initial registration
+        const registrationDate = convenio.created_at ? convenio.created_at.split(' ')[0] : (convenio.fecha_inicio || '2026-01-01');
+        tempHistory.push({
+          id: -1,
+          convenio_id: Number(id),
+          old_status: 'Ninguno',
+          new_status: 'Vigente',
+          changed_by_email: 'sistema@local',
+          changed_by_name: 'Sistema de Gestión',
+          details: 'Registro inicial del convenio',
+          created_at: registrationDate
+        });
+
+        // Did it have a suspension?
+        if (convenio.fecha_suspension) {
+          tempHistory.push({
+            id: -2,
+            convenio_id: Number(id),
+            old_status: 'Vigente',
+            new_status: 'Suspendido',
+            changed_by_email: 'sistema@local',
+            changed_by_name: 'Sistema de Gestión',
+            details: `Suspensión temporal registrada para iniciar el ${convenio.fecha_suspension}`,
+            created_at: convenio.fecha_suspension
+          });
+
+          // Did it have a reinicio?
+          if (convenio.fecha_reinicio) {
+            // Determine what status it returned to
+            let effectiveEndDate = convenio.fecha_terminacion_prorroga || convenio.fecha_terminacion_ampliacion || convenio.fecha_terminacion;
+            let statusAfterReinicio = 'Vigente';
+            if (effectiveEndDate) {
+              const reinicioDate = new Date(convenio.fecha_reinicio);
+              const endDate = new Date(effectiveEndDate);
+              const diffDays = Math.ceil((endDate.getTime() - reinicioDate.getTime()) / (1000 * 60 * 60 * 24));
+              if (diffDays < 0) {
+                statusAfterReinicio = 'Vencido';
+              } else if (diffDays <= 30) {
+                statusAfterReinicio = 'Vence Pronto (<30d)';
+              } else if (diffDays <= 90) {
+                statusAfterReinicio = 'Próximo (<90d)';
+              }
+            }
+
+            tempHistory.push({
+              id: -3,
+              convenio_id: Number(id),
+              old_status: 'Suspendido',
+              new_status: statusAfterReinicio,
+              changed_by_email: 'sistema@local',
+              changed_by_name: 'Sistema de Gestión',
+              details: `Reinicio de actividades registrado el ${convenio.fecha_reinicio}`,
+              created_at: convenio.fecha_reinicio
+            });
+          }
+        }
+
+        return res.json(tempHistory);
+      }
+
+      return res.json(rows);
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: "Error al obtener historial de estados" });
+    }
+  });
+
   // Convenios: Create
   app.post("/api/convenios", async (req, res) => {
     try {
@@ -1318,6 +1435,25 @@ async function startServer() {
 
       await logAudit(db, user, 'CREACION', 'convenio', newConvenio.id, `Creación de convenio ${newConvenio.codigo} - ${newConvenio.titulo_proyecto}`);
 
+      // Insert initial status history entry
+      try {
+        const initialStatus = getConvenioStatusString(newConvenio);
+        await db.run(`
+          INSERT INTO convenio_status_history (convenio_id, old_status, new_status, changed_by_email, changed_by_name, details, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [
+          newConvenio.id,
+          'Ninguno',
+          initialStatus,
+          user.email,
+          user.name || user.email,
+          'Registro inicial del convenio',
+          new Date().toISOString().split('T')[0]
+        ]);
+      } catch (historyErr) {
+        console.error("Error inserting initial status history:", historyErr);
+      }
+
       return res.status(201).json(newConvenio);
     } catch (err: any) {
       console.error(err);
@@ -1337,10 +1473,12 @@ async function startServer() {
       const db = await getDb();
       const fields = req.body;
 
-      const current = await db.get("SELECT id FROM convenios WHERE id = ?", [id]);
+      const current = await db.get("SELECT * FROM convenios WHERE id = ?", [id]);
       if (!current) {
         return res.status(404).json({ error: "Convenio no encontrado" });
       }
+
+      const oldStatus = getConvenioStatusString(current);
 
       // Check code uniqueness if changing
       if (fields.codigo) {
@@ -1460,6 +1598,40 @@ async function startServer() {
       }
 
       await logAudit(db, user, 'EDICION', 'convenio', updated.id, `Edición de convenio ${updated.codigo} - ${updated.titulo_proyecto}`);
+
+      // Insert status history entry if status has changed
+      try {
+        const newStatus = getConvenioStatusString(updated);
+        if (oldStatus !== newStatus) {
+          let detailsStr = `Cambio de estado al actualizar datos del convenio`;
+          if (oldStatus === 'Vigente' && newStatus === 'Suspendido') {
+            detailsStr = `Convenio suspendido temporalmente. Fecha de suspensión: ${updated.fecha_suspension}`;
+          } else if (oldStatus === 'Suspendido' && newStatus !== 'Suspendido') {
+            detailsStr = `Convenio reiniciado de su suspensión. Fecha de reinicio: ${updated.fecha_reinicio}`;
+          } else if (newStatus === 'Vencido') {
+            detailsStr = `El convenio ha cumplido su fecha límite de vigencia`;
+          } else if (newStatus === 'Vence Pronto (<30d)') {
+            detailsStr = `El convenio entró en periodo de vencimiento cercano (<30 días)`;
+          } else if (newStatus === 'Próximo (<90d)') {
+            detailsStr = `El convenio entró en periodo de seguimiento trimestral (<90 días)`;
+          }
+
+          await db.run(`
+            INSERT INTO convenio_status_history (convenio_id, old_status, new_status, changed_by_email, changed_by_name, details, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, [
+            id,
+            oldStatus,
+            newStatus,
+            user.email,
+            user.name || user.email,
+            detailsStr,
+            new Date().toISOString().split('T')[0]
+          ]);
+        }
+      } catch (historyErr) {
+        console.error("Error inserting status change history:", historyErr);
+      }
 
       return res.json(updated);
     } catch (err: any) {
